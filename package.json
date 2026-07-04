@@ -1,0 +1,19 @@
+{
+  "name": "shuiguo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "setup-login": "node scripts/setup-login.cjs",
+    "listen": "node scripts/listen-dingtalk.cjs",
+    "healthcheck": "node scripts/check-listener-health.cjs",
+    "notify": "node scripts/send-dingtalk.cjs",
+    "report": "node scripts/daily-report.cjs",
+    "zhimadi:current": "node scripts/read-current-zhimadi.cjs",
+    "lemeng:current": "node scripts/read-current-lemeng.cjs"
+  },
+  "dependencies": {
+    "dingtalk-stream": "^2.1.6-beta.1",
+    "playwright": "^1.61.1"
+  }
+}
