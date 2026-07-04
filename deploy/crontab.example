@@ -1,0 +1,6 @@
+# 每晚 22:05 自动推送月报
+5 22 * * * cd /opt/fruit-store-report-bot && /usr/bin/pnpm report >> output/cron-report.log 2>&1
+
+# 每 5 分钟检查一次钉钉监听是否还活着；监听死掉会推送告警
+*/5 * * * * cd /opt/fruit-store-report-bot && /usr/bin/pnpm healthcheck >> output/cron-healthcheck.log 2>&1
+

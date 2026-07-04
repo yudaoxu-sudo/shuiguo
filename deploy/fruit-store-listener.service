@@ -1,0 +1,16 @@
+[Unit]
+Description=Fruit Store DingTalk Listener
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/fruit-store-report-bot
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/pnpm listen
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+
