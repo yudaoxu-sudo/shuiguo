@@ -80,7 +80,7 @@ async function readZhimadi(page) {
   const frame = await frameElement.contentFrame();
   if (!frame) throw new Error("没有找到芝麻地报表 iframe");
 
-  await frame.waitForSelector("#choose_date, #start_date", { timeout: 15000 });
+  await frame.waitForSelector("#choose_date, #start_date", { state: "attached", timeout: 15000 });
   await frame.evaluate(({ startDate, endDate }) => {
     const setValue = (selector, value) => {
       const element = document.querySelector(selector);
