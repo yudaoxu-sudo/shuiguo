@@ -108,10 +108,9 @@ async function readLemeng(page) {
     throw new Error("乐檬登录态失效，需要先运行 setup-login 并手动完成验证码登录");
   }
 
-  await page.getByText("本月累计销售", { exact: true }).waitFor({ timeout: 20000 });
-  await page.getByText("月销售额排名", { exact: true }).waitFor({ timeout: 20000 });
+  await waitForLemengDashboard(page);
   let monthly;
-  const deadline = Date.now() + 20000;
+  const deadline = Date.now() + 60000;
   while (!monthly) {
     const text = await page.locator("body").innerText({ timeout: 15000 });
     try {
@@ -150,6 +149,32 @@ async function readLemeng(page) {
   }
 
   return { monthly, ranking };
+}
+
+async function waitForLemengDashboard(page) {
+  const startedAt = Date.now();
+  const deadline = startedAt + 60000;
+  let refreshed = false;
+  let lastText = "";
+
+  while (Date.now() < deadline) {
+    lastText = await page.locator("body").innerText({ timeout: 15000 }).catch(() => "");
+    if (lastText.includes("本月累计销售") && lastText.includes("月销售额排名")) {
+      return;
+    }
+
+    if (!refreshed && Date.now() - startedAt > 20000) {
+      const refreshButton = page.getByText("全局刷新", { exact: true });
+      if ((await refreshButton.count()) > 0) {
+        await refreshButton.first().click().catch(() => {});
+      }
+      refreshed = true;
+    }
+
+    await page.waitForTimeout(1000);
+  }
+
+  throw new Error(`乐檬数据指标加载超时：${lastText.slice(0, 200).replace(/\s+/g, " ")}`);
 }
 
 async function isLoginPage(page) {
