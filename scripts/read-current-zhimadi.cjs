@@ -80,8 +80,8 @@ function buildMarkdown(dateText, report, lemeng = null) {
     const salesPurchaseRatio = purchaseAmount === 0 ? 0 : (lemengSales / purchaseAmount) * 100;
 
     lines.push(
-      `综合毛利：${formatMoney(grossProfit)}`,
-      `综合毛利率：${formatPercent(grossMargin)}`,
+      `本月总毛利：${formatMoney(grossProfit)}`,
+      `本月总毛利率：${formatPercent(grossMargin)}`,
       `销售/进货比：${formatPercent(salesPurchaseRatio)}`,
     );
   }
