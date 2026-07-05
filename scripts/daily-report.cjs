@@ -63,6 +63,22 @@ async function clickByText(frameOrPage, text) {
   await locator.click();
 }
 
+async function gotoWithRetry(page, url, options, attempts = 3) {
+  let lastError;
+  for (let index = 0; index < attempts; index += 1) {
+    try {
+      return await page.goto(url, options);
+    } catch (error) {
+      lastError = error;
+      if (index < attempts - 1) {
+        await page.waitForTimeout(3000);
+      }
+    }
+  }
+
+  throw lastError;
+}
+
 async function readZhimadi(page) {
   await page.goto(process.env.ZHIMADI_URL || "https://aems.zhimadi.cn/index.php?s=/Index/index.html", { waitUntil: "domcontentloaded" });
 
@@ -102,7 +118,7 @@ async function readZhimadi(page) {
 }
 
 async function readLemeng(page) {
-  await page.goto("https://sharec.lemengcloud.com/report/home/data-index", { waitUntil: "domcontentloaded" });
+  await gotoWithRetry(page, "https://sharec.lemengcloud.com/report/home/data-index", { waitUntil: "domcontentloaded", timeout: 60000 });
 
   if (await isLoginPage(page)) {
     throw new Error("乐檬登录态失效，需要先运行 setup-login 并手动完成验证码登录");
