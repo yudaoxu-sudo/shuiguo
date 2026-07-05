@@ -67,9 +67,6 @@ function buildMarkdown(dateText, report, lemeng = null) {
     "#### 总览",
     `乐檬销售额：${lemeng ? formatMoney(lemeng.monthly.salesWithCoupon) : "-"}`,
     `芝麻地进货额：${formatMoney(report.totals.sales)}`,
-    `仓库成本：${formatMoney(report.totals.cost)}`,
-    `芝麻地利润：${formatMoney(report.totals.profit)}`,
-    `芝麻地毛利率：${report.totals.grossMargin}`,
   ];
 
   if (lemeng) {
@@ -77,26 +74,23 @@ function buildMarkdown(dateText, report, lemeng = null) {
     const purchaseAmount = report.totals.sales;
     const grossProfit = lemengSales - purchaseAmount;
     const grossMargin = lemengSales === 0 ? 0 : (grossProfit / lemengSales) * 100;
-    const salesPurchaseRatio = purchaseAmount === 0 ? 0 : (lemengSales / purchaseAmount) * 100;
 
     lines.push(
-      `本月总毛利：${formatMoney(grossProfit)}`,
+      `本月总毛利（销售-进货）：${formatMoney(grossProfit)}`,
       `本月总毛利率：${formatPercent(grossMargin)}`,
-      `销售/进货比：${formatPercent(salesPurchaseRatio)}`,
     );
   }
 
   lines.push(
     "",
-    "#### 芝麻地门店进货数据",
+    "#### 芝麻地门店进货额",
   );
 
   for (const [index, row] of report.rows.entries()) {
     lines.push(
       "",
       `${index + 1}. ${row.store}`,
-      `进货 ${formatMoney(row.sales)} | 成本 ${formatMoney(row.cost)}`,
-      `利润 ${formatMoney(row.profit)} | 毛利 ${row.grossMargin}`,
+      `进货额 ${formatMoney(row.sales)}`,
     );
   }
 
