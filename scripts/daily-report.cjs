@@ -80,7 +80,7 @@ async function readZhimadi(page) {
   const frame = await frameElement.contentFrame();
   if (!frame) throw new Error("没有找到芝麻地报表 iframe");
 
-  await frame.getByText("销售汇总表(按客户)", { exact: true }).waitFor({ timeout: 15000 });
+  await frame.waitForSelector("#choose_date, #start_date", { timeout: 15000 });
   await frame.evaluate(({ startDate, endDate }) => {
     const setValue = (selector, value) => {
       const element = document.querySelector(selector);
@@ -96,7 +96,7 @@ async function readZhimadi(page) {
   }, { startDate: monthStartText(), endDate: todayText() });
   await clickByText(frame, "查询");
 
-  await frame.getByText("合计：", { exact: true }).waitFor({ timeout: 15000 });
+  await frame.getByText("合计：", { exact: true }).waitFor({ timeout: 30000 });
   const text = await frame.locator("body").innerText({ timeout: 15000 });
   return parseZhimadiText(text);
 }
