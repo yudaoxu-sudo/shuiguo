@@ -5,6 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=ubuntu
+Group=ubuntu
 WorkingDirectory=/opt/fruit-store-report-bot
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/pnpm listen
@@ -13,4 +15,3 @@ RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
-
