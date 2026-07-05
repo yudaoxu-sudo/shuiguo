@@ -60,6 +60,67 @@ function formatPercent(value) {
   return `${Number(value).toFixed(2)}%`;
 }
 
+function storeKey(store) {
+  const value = String(store || "")
+    .replace(/\s+/g, "")
+    .replace(/^有花头/, "")
+    .replace(/直营/g, "")
+    .replace(/店$/g, "");
+
+  if (value.includes("华府")) return "华府";
+  if (value.includes("西门") || value.includes("解放西路")) return "解放西路";
+
+  for (const key of ["天逸湾", "古城街", "通宝城", "白溪", "水木花都", "金陵北路"]) {
+    if (value.includes(key)) return key;
+  }
+
+  return value;
+}
+
+function looksLikeStore(store) {
+  return /店|花都|湾|城|苑|路/.test(String(store || ""));
+}
+
+function buildStoreProfitRows(purchaseRows, salesRows) {
+  const purchaseByKey = new Map();
+  for (const row of purchaseRows) {
+    const key = storeKey(row.store);
+    const current = purchaseByKey.get(key) || { store: row.store, purchase: 0 };
+    current.purchase += row.sales;
+    purchaseByKey.set(key, current);
+  }
+
+  const usedPurchaseKeys = new Set();
+  const rows = [];
+
+  for (const row of salesRows) {
+    const key = storeKey(row.store);
+    const purchase = purchaseByKey.get(key);
+    const purchaseAmount = purchase?.purchase || 0;
+    usedPurchaseKeys.add(key);
+    rows.push({
+      store: row.store,
+      sales: row.sales,
+      purchase: purchaseAmount,
+      profit: row.sales - purchaseAmount,
+      grossMargin: row.sales === 0 ? 0 : ((row.sales - purchaseAmount) / row.sales) * 100,
+    });
+  }
+
+  for (const [key, row] of purchaseByKey) {
+    if (usedPurchaseKeys.has(key) || !looksLikeStore(row.store)) continue;
+    rows.push({
+      store: row.store,
+      sales: 0,
+      purchase: row.purchase,
+      profit: -row.purchase,
+      grossMargin: 0,
+    });
+  }
+
+  return rows.sort((a, b) => b.profit - a.profit);
+}
+
 function buildMarkdown(dateText, report, lemeng = null) {
   const lines = [
     `### 水果店月报 ${dateText}`,
@@ -86,7 +147,8 @@ function buildMarkdown(dateText, report, lemeng = null) {
     "#### 芝麻地门店进货额",
   );
 
-  for (const [index, row] of report.rows.entries()) {
+  const purchaseRows = [...report.rows].sort((a, b) => b.sales - a.sales);
+  for (const [index, row] of purchaseRows.entries()) {
     lines.push(
       "",
       `${index + 1}. ${row.store}`,
@@ -105,6 +167,21 @@ function buildMarkdown(dateText, report, lemeng = null) {
         "",
         `${row.rank}. ${row.store}`,
         `销售 ${formatMoney(row.sales)} | 占比 ${row.rate}`,
+      );
+    }
+
+    const profitRows = buildStoreProfitRows(report.rows, lemeng.ranking);
+    lines.push(
+      "",
+      "#### 门店毛利排名",
+    );
+
+    for (const [index, row] of profitRows.entries()) {
+      lines.push(
+        "",
+        `${index + 1}. ${row.store}`,
+        `销售 ${formatMoney(row.sales)} | 进货 ${formatMoney(row.purchase)}`,
+        `毛利 ${formatMoney(row.profit)} | 毛利率 ${formatPercent(row.grossMargin)}`,
       );
     }
   }
@@ -136,4 +213,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseZhimadiText, buildMarkdown };
+module.exports = { parseZhimadiText, buildMarkdown, storeKey, buildStoreProfitRows };
