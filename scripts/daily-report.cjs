@@ -83,7 +83,7 @@ async function readZhimadi(page) {
   await page.goto(process.env.ZHIMADI_URL || "https://aems.zhimadi.cn/index.php?s=/Index/index.html", { waitUntil: "domcontentloaded" });
 
   if (await isLoginPage(page)) {
-    throw new Error("芝麻地登录态失效，需要先运行 setup-login 并手动完成验证码登录");
+    throw new Error("芝麻地登录态失效，需要运行 pnpm zhimadi:login 并按提示输入图形验证码");
   }
 
   await page.waitForSelector("iframe#sellSummary_customSummary", { timeout: 15000 }).catch(async () => {

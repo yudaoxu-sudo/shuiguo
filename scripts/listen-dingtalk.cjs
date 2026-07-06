@@ -160,8 +160,7 @@ async function main() {
     await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "收到 666，正在生成本月报表。");
 
     runMonthlyReport()
-      .catch(async (error) => {
-        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, `本月报表生成失败：${error.message}`);
+      .catch((error) => {
         console.error(error.stack || error.message);
       })
       .finally(() => {

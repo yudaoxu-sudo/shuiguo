@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const { execFile } = require("child_process");
 const { loadEnv, sendDingTalkMarkdown } = require("./send-dingtalk.cjs");
 
 const heartbeatPath = path.resolve("output/listener-heartbeat.json");
@@ -21,6 +22,17 @@ function shouldAlert(now) {
   const state = readJson(statePath);
   if (!state?.lastAlertAt) return true;
   return now - Date.parse(state.lastAlertAt) > alertCooldownMs;
+}
+
+function restartListenerService() {
+  return new Promise((resolve) => {
+    execFile("sudo", ["-n", "systemctl", "restart", "fruit-store-listener.service"], (error, stdout, stderr) => {
+      resolve({
+        ok: !error,
+        message: (stderr || stdout || error?.message || "").trim(),
+      });
+    });
+  });
 }
 
 async function main() {
@@ -47,9 +59,12 @@ async function main() {
   }
 
   const lastHeartbeatText = heartbeat?.updatedAt || "从未写入";
+  const repair = await restartListenerService();
+  const repairText = repair.ok ? "已自动重启监听服务。" : `自动重启失败：${repair.message || "未知错误"}`;
+
   await sendDingTalkMarkdown(
     "水果店监听异常",
-    `### 水果店监听异常\n\n监听心跳超时。\n\n最后心跳：${lastHeartbeatText}\n\n请检查服务器上的 \`pnpm listen\` 或 systemd 服务。`,
+    `### 水果店监听异常\n\n监听心跳超时。\n\n最后心跳：${lastHeartbeatText}\n\n${repairText}`,
   );
 
   writeJson(statePath, {
@@ -57,8 +72,9 @@ async function main() {
     lastCheckAt: new Date(now).toISOString(),
     lastAlertAt: new Date(now).toISOString(),
     lastHeartbeatAt: heartbeat?.updatedAt || null,
+    autoRestartOk: repair.ok,
   });
-  console.log("listener-stale-alert-sent");
+  console.log(repair.ok ? "listener-stale-restarted-alert-sent" : "listener-stale-restart-failed-alert-sent");
 }
 
 if (require.main === module) {
@@ -67,4 +83,3 @@ if (require.main === module) {
     process.exit(1);
   });
 }
-
