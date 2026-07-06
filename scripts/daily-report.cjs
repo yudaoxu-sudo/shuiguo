@@ -112,9 +112,32 @@ async function readZhimadi(page) {
   }, { startDate: monthStartText(), endDate: todayText() });
   await clickByText(frame, "查询");
 
-  await frame.getByText("合计：", { exact: true }).waitFor({ timeout: 30000 });
+  await waitForZhimadiSummary(frame);
   const text = await frame.locator("body").innerText({ timeout: 15000 });
   return parseZhimadiText(text);
+}
+
+async function waitForZhimadiSummary(frame) {
+  const startedAt = Date.now();
+  const deadline = startedAt + 60000;
+  let queriedAgain = false;
+  let lastText = "";
+
+  while (Date.now() < deadline) {
+    lastText = await frame.locator("body").innerText({ timeout: 15000 }).catch(() => "");
+    if (lastText.includes("合计：")) {
+      return;
+    }
+
+    if (!queriedAgain && Date.now() - startedAt > 20000) {
+      await clickByText(frame, "查询").catch(() => {});
+      queriedAgain = true;
+    }
+
+    await frame.waitForTimeout(1000);
+  }
+
+  throw new Error(`芝麻地销售汇总加载超时：${lastText.slice(0, 200).replace(/\s+/g, " ")}`);
 }
 
 async function readLemeng(page) {
