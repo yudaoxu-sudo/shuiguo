@@ -222,6 +222,15 @@ function extractCaptchaCode(text) {
   return /^[A-Z0-9]{4,6}$/.test(compact) ? compact : "";
 }
 
+function extractManualCaptchaCode(text) {
+  const normalized = String(text || "").toUpperCase();
+  const labeled = normalized.match(/(?:验证码|登录)[:：]?([A-Z0-9]{4,6})/);
+  if (labeled) return labeled[1];
+
+  const tokens = normalized.match(/[A-Z0-9]{4,6}/g) || [];
+  return tokens.length === 1 ? tokens[0] : "";
+}
+
 async function recognizeCaptchaWithOpenAI(filePath) {
   if (!process.env.OPENAI_API_KEY) return "";
 
@@ -373,9 +382,9 @@ async function main() {
       running = false;
     }
 
-    const codeMatch = text.match(/^(?:验证码|登录)?([A-Za-z0-9]{4,6})$/);
-    if (loginSession && codeMatch) {
-      const code = codeMatch[1];
+    const manualCaptchaCode = extractManualCaptchaCode(text);
+    if (loginSession && manualCaptchaCode) {
+      const code = manualCaptchaCode;
       try {
         await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "收到验证码，正在恢复芝麻地登录。");
         await submitZhimadiLoginCode(loginSession, code);
