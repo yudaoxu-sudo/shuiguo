@@ -9,6 +9,7 @@
     "listen": "node scripts/listen-dingtalk.cjs",
     "healthcheck": "node scripts/check-listener-health.cjs",
     "login-healthcheck": "node scripts/check-login-health.cjs",
+    "report-healthcheck": "node scripts/check-report-health.cjs",
     "notify": "node scripts/send-dingtalk.cjs",
     "report": "node scripts/daily-report.cjs",
     "zhimadi:current": "node scripts/read-current-zhimadi.cjs",

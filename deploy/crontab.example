@@ -6,3 +6,6 @@
 
 # 每小时检查一次后台登录态；登录过期会推送告警
 0 * * * * cd /opt/fruit-store-report-bot && /usr/bin/pnpm login-healthcheck >> output/cron-login-healthcheck.log 2>&1
+
+# 白天做报表预检，只验证抓取能力，不推送正式报表；失败会推送告警
+17 9-21/3 * * * cd /opt/fruit-store-report-bot && /usr/bin/pnpm report-healthcheck >> output/cron-report-healthcheck.log 2>&1

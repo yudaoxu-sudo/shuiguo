@@ -55,6 +55,15 @@ function commandKey(message, text) {
   ].join(":");
 }
 
+function errorSummary(error) {
+  return String(error?.output || error?.message || error)
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .slice(-8)
+    .join("\n")
+    .slice(0, 900);
+}
+
 function loadCommandState() {
   try {
     return JSON.parse(fs.readFileSync(commandStatePath, "utf8"));
@@ -464,6 +473,12 @@ async function main() {
           }
         }
         console.error(error.stack || error.message);
+        await sendSessionText(
+          client,
+          message.sessionWebhook,
+          message.senderStaffId,
+          `本月报表生成失败，已触发失败通知。\n${errorSummary(error)}`,
+        );
       })
       .finally(() => {
         if (!loginSession) running = false;

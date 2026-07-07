@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
 const { loadEnv, sendDingTalkMarkdown } = require("./send-dingtalk.cjs");
+const { withLock } = require("./runtime-lock.cjs");
 
 const statePath = path.resolve("output/login-health-state.json");
 const alertCooldownMs = Number(process.env.LOGIN_ALERT_COOLDOWN_MS || 6 * 60 * 60 * 1000);
@@ -56,19 +57,24 @@ async function main() {
   const userDataDir = path.resolve(process.env.USER_DATA_DIR || "output/browser-profile");
   fs.mkdirSync(userDataDir, { recursive: true });
 
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    headless: process.env.HEADLESS === "true",
-    executablePath: chromeExecutablePath(),
-  });
-
-  const page = context.pages()[0] || await context.newPage();
   const problems = [];
-  try {
-    if (!(await zhimadiOk(page))) problems.push("芝麻地登录态失效");
-    if (!(await lemengOk(page))) problems.push("乐檬登录态失效");
-  } finally {
-    await context.close();
-  }
+  await withLock("browser-profile", {
+    waitMs: Number(process.env.BROWSER_LOCK_WAIT_MS || 10 * 60 * 1000),
+    staleMs: Number(process.env.BROWSER_LOCK_STALE_MS || 30 * 60 * 1000),
+  }, async () => {
+    const context = await chromium.launchPersistentContext(userDataDir, {
+      headless: process.env.HEADLESS === "true",
+      executablePath: chromeExecutablePath(),
+    });
+
+    const page = context.pages()[0] || await context.newPage();
+    try {
+      if (!(await zhimadiOk(page))) problems.push("芝麻地登录态失效");
+      if (!(await lemengOk(page))) problems.push("乐檬登录态失效");
+    } finally {
+      await context.close();
+    }
+  });
 
   if (problems.length === 0) {
     writeJson(statePath, {

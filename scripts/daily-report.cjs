@@ -4,6 +4,7 @@ const path = require("path");
 const { chromium } = require("playwright");
 const { parseZhimadiText, buildMarkdown } = require("./read-current-zhimadi.cjs");
 const { parseLemengMonthlyText } = require("./read-current-lemeng.cjs");
+const { withLock } = require("./runtime-lock.cjs");
 
 function loadEnv() {
   const envPath = path.resolve(".env");
@@ -81,6 +82,42 @@ async function gotoWithRetry(page, url, options, attempts = 3) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function safeName(value) {
+  return String(value).replace(/[^A-Za-z0-9_-]/g, "-");
+}
+
+async function saveDebugArtifacts(page, label, error) {
+  const outputDir = path.resolve("output/debug");
+  fs.mkdirSync(outputDir, { recursive: true });
+
+  const baseName = `${safeName(label)}-${todayText()}-${Date.now()}`;
+  const screenshotPath = path.join(outputDir, `${baseName}.png`);
+  const textPath = path.join(outputDir, `${baseName}.txt`);
+
+  await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+  const pageText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
+  fs.writeFileSync(textPath, [
+    `error=${error?.stack || error?.message || error}`,
+    "",
+    pageText,
+  ].join("\n"));
+
+  return { screenshotPath, textPath };
+}
+
+async function withFreshPage(context, label, action) {
+  const page = await context.newPage();
+  try {
+    return await action(page);
+  } catch (error) {
+    const artifacts = await saveDebugArtifacts(page, label, error);
+    error.message = `${error.message}；调试文件 ${artifacts.screenshotPath}`;
+    throw error;
+  } finally {
+    await page.close().catch(() => {});
+  }
 }
 
 async function retryStep(name, action, attempts = 3) {
@@ -311,22 +348,26 @@ async function main() {
   const outputDir = path.resolve("output");
   fs.mkdirSync(outputDir, { recursive: true });
 
-  const context = await launchContext();
-  const page = context.pages()[0] || await context.newPage();
+  await withLock("browser-profile", {
+    waitMs: Number(process.env.BROWSER_LOCK_WAIT_MS || 10 * 60 * 1000),
+    staleMs: Number(process.env.BROWSER_LOCK_STALE_MS || 30 * 60 * 1000),
+  }, async () => {
+    const context = await launchContext();
 
-  try {
-    const attempts = Number(process.env.REPORT_STEP_ATTEMPTS || 3);
-    const zhimadi = await retryStep("芝麻地报表", () => readZhimadi(page), attempts);
-    const lemeng = await retryStep("乐檬报表", () => readLemeng(page), attempts);
-    const dateText = todayText();
-    fs.writeFileSync(path.join(outputDir, `zhimadi-monthly-${dateText}.json`), JSON.stringify(zhimadi, null, 2));
-    fs.writeFileSync(path.join(outputDir, `lemeng-monthly-${dateText}.json`), JSON.stringify(lemeng, null, 2));
-    const markdown = buildMarkdown(dateText, zhimadi, lemeng);
-    fs.writeFileSync(path.join(outputDir, `monthly-report-${dateText}.md`), markdown);
-    await sendDingTalk(markdown);
-  } finally {
-    await context.close();
-  }
+    try {
+      const attempts = Number(process.env.REPORT_STEP_ATTEMPTS || 3);
+      const zhimadi = await retryStep("芝麻地报表", () => withFreshPage(context, "zhimadi", readZhimadi), attempts);
+      const lemeng = await retryStep("乐檬报表", () => withFreshPage(context, "lemeng", readLemeng), attempts);
+      const dateText = todayText();
+      fs.writeFileSync(path.join(outputDir, `zhimadi-monthly-${dateText}.json`), JSON.stringify(zhimadi, null, 2));
+      fs.writeFileSync(path.join(outputDir, `lemeng-monthly-${dateText}.json`), JSON.stringify(lemeng, null, 2));
+      const markdown = buildMarkdown(dateText, zhimadi, lemeng);
+      fs.writeFileSync(path.join(outputDir, `monthly-report-${dateText}.md`), markdown);
+      await sendDingTalk(markdown);
+    } finally {
+      await context.close();
+    }
+  });
 }
 
 if (require.main === module) {
