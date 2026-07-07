@@ -380,6 +380,36 @@ async function main() {
     clientSecret: process.env.DINGTALK_CLIENT_SECRET,
   });
 
+  async function startZhimadiCaptchaFlow(message, afterLoginReport) {
+    loginSession = await startZhimadiLoginSession();
+    if (loginSession.alreadyLoggedIn) {
+      loginSession = null;
+      await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地当前登录正常。");
+      return "already-ok";
+    }
+    loginSession.afterLoginReport = afterLoginReport;
+
+    const autoLogin = await tryAutoZhimadiLogin(loginSession);
+    if (autoLogin.ok) {
+      loginSession = null;
+      await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地已自动重新登录。");
+      if (afterLoginReport) {
+        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "正在重新生成月报。");
+        await runMonthlyReport();
+      }
+      return "auto-ok";
+    }
+
+    const screenshots = await captureZhimadiCaptcha(loginSession);
+    loginSession.screenshotPath = screenshots.screenshotPath;
+    loginSession.captchaPath = screenshots.captchaPath;
+
+    const mediaId = await uploadDingTalkImage(client, loginSession.captchaPath);
+    await sendGroupImage(client, message, mediaId);
+    await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地需要验证码。请看上面的验证码图，回复固定格式：验证码ABCD");
+    return "captcha-sent";
+  }
+
   client.registerCallbackListener(TOPIC_ROBOT, async (res) => {
     writeHeartbeat("message");
     const message = JSON.parse(res.data);
@@ -397,22 +427,49 @@ async function main() {
       try {
         await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "收到验证码，正在恢复芝麻地登录。");
         await submitZhimadiLoginCode(loginSession, code);
+        const afterLoginReport = loginSession.afterLoginReport;
         loginSession = null;
-        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地登录已恢复，正在重新生成月报。");
-        running = true;
-        runMonthlyReport()
-          .catch((error) => {
-            console.error(error.stack || error.message);
-          })
-          .finally(() => {
-            running = false;
-          });
+        if (afterLoginReport) {
+          await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地登录已恢复，正在重新生成月报。");
+          running = true;
+          runMonthlyReport()
+            .catch((error) => {
+              console.error(error.stack || error.message);
+            })
+            .finally(() => {
+              running = false;
+            });
+        } else {
+          running = false;
+          await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地登录已恢复。");
+        }
       } catch (error) {
         await closeLoginSession(loginSession);
         loginSession = null;
         running = false;
         await sendSessionText(client, message.sessionWebhook, message.senderStaffId, `验证码登录失败：${error.message}。请重新发送 666 获取新验证码。`);
         console.error(error.stack || error.message);
+      }
+      return;
+    }
+
+    if (text.includes("登录")) {
+      if (running) {
+        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "当前有任务正在运行，稍等后再发 登录。");
+        return;
+      }
+
+      running = true;
+      try {
+        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "正在检查芝麻地登录态。");
+        const result = await startZhimadiCaptchaFlow(message, false);
+        if (result !== "captcha-sent") running = false;
+      } catch (error) {
+        await closeLoginSession(loginSession);
+        loginSession = null;
+        running = false;
+        console.error(error.stack || error.message);
+        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, `芝麻地登录修复启动失败：${error.message}`);
       }
       return;
     }
@@ -440,29 +497,7 @@ async function main() {
       .catch(async (error) => {
         if (String(error.output || error.message).includes("芝麻地登录态失效")) {
           try {
-            loginSession = await startZhimadiLoginSession();
-            if (loginSession.alreadyLoggedIn) {
-              loginSession = null;
-              await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地登录已恢复，正在重新生成月报。");
-              await runMonthlyReport();
-              return;
-            }
-
-            const autoLogin = await tryAutoZhimadiLogin(loginSession);
-            if (autoLogin.ok) {
-              loginSession = null;
-              await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地已自动重新登录，正在重新生成月报。");
-              await runMonthlyReport();
-              return;
-            }
-
-            const screenshots = await captureZhimadiCaptcha(loginSession);
-            loginSession.screenshotPath = screenshots.screenshotPath;
-            loginSession.captchaPath = screenshots.captchaPath;
-
-            const mediaId = await uploadDingTalkImage(client, loginSession.captchaPath);
-            await sendGroupImage(client, message, mediaId);
-            await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地需要验证码。请看上面的验证码图，回复：验证码1234");
+            await startZhimadiCaptchaFlow(message, true);
             return;
           } catch (loginError) {
             await closeLoginSession(loginSession);
