@@ -32,14 +32,32 @@ function signedWebhookUrl() {
   return `${webhook}${webhook.includes("?") ? "&" : "?"}timestamp=${timestamp}&sign=${sign}`;
 }
 
-async function sendDingTalkMarkdown(title, text) {
+function dingTalkAtConfig(alert) {
+  if (!alert) return undefined;
+
+  const atMobiles = String(process.env.DINGTALK_ALERT_MOBILES || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  return {
+    atMobiles,
+    isAtAll: process.env.DINGTALK_ALERT_ALL === "true",
+  };
+}
+
+async function sendDingTalkMarkdown(title, text, options = {}) {
+  const payload = {
+    msgtype: "markdown",
+    markdown: { title, text },
+  };
+  const at = dingTalkAtConfig(options.alert);
+  if (at) payload.at = at;
+
   const response = await fetch(signedWebhookUrl(), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      msgtype: "markdown",
-      markdown: { title, text },
-    }),
+    body: JSON.stringify(payload),
   });
 
   const result = await response.text();
@@ -65,4 +83,3 @@ if (require.main === module) {
 }
 
 module.exports = { loadEnv, sendDingTalkMarkdown };
-

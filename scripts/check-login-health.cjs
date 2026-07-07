@@ -88,6 +88,7 @@ async function main() {
     await sendDingTalkMarkdown(
       "水果店登录态异常",
       `### 水果店登录态异常\n\n${problems.map((problem) => `- ${problem}`).join("\n")}${repairHint}`,
+      { alert: true },
     );
   }
 

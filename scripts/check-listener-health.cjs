@@ -65,6 +65,7 @@ async function main() {
   await sendDingTalkMarkdown(
     "水果店监听异常",
     `### 水果店监听异常\n\n监听心跳超时。\n\n最后心跳：${lastHeartbeatText}\n\n${repairText}`,
+    { alert: true },
   );
 
   writeJson(statePath, {

@@ -79,6 +79,26 @@ async function gotoWithRetry(page, url, options, attempts = 3) {
   throw lastError;
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function retryStep(name, action, attempts = 3) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      if (attempt > 1) console.log(`${name}第 ${attempt} 次重试`);
+      return await action();
+    } catch (error) {
+      lastError = error;
+      console.warn(`${name}第 ${attempt} 次失败：${error.message}`);
+      if (attempt < attempts) await delay(5000);
+    }
+  }
+
+  throw new Error(`${name}连续 ${attempts} 次失败：${lastError?.message || "未知错误"}`);
+}
+
 async function readZhimadi(page) {
   await page.goto(process.env.ZHIMADI_URL || "https://aems.zhimadi.cn/index.php?s=/Index/index.html", { waitUntil: "domcontentloaded" });
 
@@ -121,6 +141,7 @@ async function waitForZhimadiSummary(frame) {
   const startedAt = Date.now();
   const deadline = startedAt + 60000;
   let queriedAgain = false;
+  let refreshed = false;
   let lastText = "";
 
   while (Date.now() < deadline) {
@@ -132,6 +153,13 @@ async function waitForZhimadiSummary(frame) {
     if (!queriedAgain && Date.now() - startedAt > 20000) {
       await clickByText(frame, "查询").catch(() => {});
       queriedAgain = true;
+    }
+
+    if (!refreshed && Date.now() - startedAt > 40000) {
+      await clickByText(frame, "刷新").catch(() => {});
+      await frame.waitForTimeout(2000);
+      await clickByText(frame, "查询").catch(() => {});
+      refreshed = true;
     }
 
     await frame.waitForTimeout(1000);
@@ -221,7 +249,26 @@ async function isLoginPage(page) {
   return (await passwordInputs.count()) > 0;
 }
 
-async function sendDingTalk(markdown) {
+function dingTalkAtConfig(alert) {
+  if (!alert) return undefined;
+
+  const atMobiles = String(process.env.DINGTALK_ALERT_MOBILES || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  return {
+    atMobiles,
+    isAtAll: process.env.DINGTALK_ALERT_ALL === "true",
+  };
+}
+
+async function sendDingTalk(markdown, options = {}) {
+  if (process.env.NO_DINGTALK === "1" || process.env.NO_DINGTALK === "true") {
+    console.log(markdown);
+    return;
+  }
+
   const webhook = process.env.DINGTALK_WEBHOOK;
   if (!webhook) {
     console.log(markdown);
@@ -236,13 +283,16 @@ async function sendDingTalk(markdown) {
     url += `${url.includes("?") ? "&" : "?"}timestamp=${timestamp}&sign=${sign}`;
   }
 
-  const body = JSON.stringify({
+  const payload = {
     msgtype: "markdown",
     markdown: {
       title: "水果店月度报表",
       text: markdown,
     },
-  });
+  };
+  const at = dingTalkAtConfig(options.alert);
+  if (at) payload.at = at;
+  const body = JSON.stringify(payload);
 
   const response = await fetch(url, {
     method: "POST",
@@ -265,8 +315,9 @@ async function main() {
   const page = context.pages()[0] || await context.newPage();
 
   try {
-    const zhimadi = await readZhimadi(page);
-    const lemeng = await readLemeng(page);
+    const attempts = Number(process.env.REPORT_STEP_ATTEMPTS || 3);
+    const zhimadi = await retryStep("芝麻地报表", () => readZhimadi(page), attempts);
+    const lemeng = await retryStep("乐檬报表", () => readLemeng(page), attempts);
     const dateText = todayText();
     fs.writeFileSync(path.join(outputDir, `zhimadi-monthly-${dateText}.json`), JSON.stringify(zhimadi, null, 2));
     fs.writeFileSync(path.join(outputDir, `lemeng-monthly-${dateText}.json`), JSON.stringify(lemeng, null, 2));
@@ -282,7 +333,7 @@ if (require.main === module) {
   main().catch(async (error) => {
     loadEnv();
     const message = `### 水果店月度报表失败\n\n${error.message || error}`;
-    await sendDingTalk(message).catch(() => {});
+    await sendDingTalk(message, { alert: true }).catch(() => {});
     console.error(error.stack || error.message);
     process.exit(1);
   });
