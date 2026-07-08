@@ -4,7 +4,7 @@ const path = require("path");
 const { chromium } = require("playwright");
 const { DWClient, TOPIC_ROBOT } = require("dingtalk-stream");
 const { acquireLock } = require("./runtime-lock.cjs");
-const { sendDingTalkMarkdown } = require("./send-dingtalk.cjs");
+const { sendDingTalkImage, sendDingTalkMarkdown } = require("./send-dingtalk.cjs");
 
 const heartbeatPath = path.resolve("output/listener-heartbeat.json");
 const commandStatePath = path.resolve("output/listener-command-state.json");
@@ -242,6 +242,16 @@ async function sendGroupImage(client, message, mediaId) {
   }
 
   throw new Error(`发送验证码图片失败: ${lastError?.message || "未知错误"}`);
+}
+
+async function sendCaptchaImage(client, message, filePath) {
+  if (message?.conversationId && message?.robotCode) {
+    const mediaId = await uploadDingTalkImage(client, filePath);
+    await sendGroupImage(client, message, mediaId);
+    return;
+  }
+
+  await sendDingTalkImage(filePath);
 }
 
 async function captureZhimadiCaptcha(session) {
@@ -508,8 +518,7 @@ async function main() {
       loginSession.screenshotPath = screenshots.screenshotPath;
       loginSession.captchaPath = screenshots.captchaPath;
 
-      const mediaId = await uploadDingTalkImage(client, loginSession.captchaPath);
-      await sendGroupImage(client, message, mediaId);
+      await sendCaptchaImage(client, message, loginSession.captchaPath);
       loginSession.expireTimer = setTimeout(async () => {
         if (!loginSession) return;
         await closeLoginSession(loginSession);
@@ -536,15 +545,7 @@ async function main() {
     const state = readJson(repairStatePath);
     if (state?.handledRequestAt === request.requestedAt) return;
 
-    const context = loadGroupContext();
-    if (!context) {
-      writeJson(repairStatePath, {
-        status: "missing_group_context",
-        requestAt: request.requestedAt,
-        handledAt: new Date().toISOString(),
-      });
-      return;
-    }
+    const context = loadGroupContext() || {};
 
     running = true;
     writeJson(repairStatePath, {

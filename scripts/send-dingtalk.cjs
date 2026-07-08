@@ -68,6 +68,30 @@ async function sendDingTalkMarkdown(title, text, options = {}) {
   return result;
 }
 
+async function sendDingTalkImage(filePath) {
+  const buffer = fs.readFileSync(filePath);
+  const payload = {
+    msgtype: "image",
+    image: {
+      base64: buffer.toString("base64"),
+      md5: crypto.createHash("md5").update(buffer).digest("hex"),
+    },
+  };
+
+  const response = await fetch(signedWebhookUrl(), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  const result = await response.text();
+  if (!response.ok) {
+    throw new Error(`钉钉图片推送失败: ${response.status} ${result}`);
+  }
+
+  return result;
+}
+
 async function main() {
   loadEnv();
   const text = process.argv.slice(2).join(" ") || "钉钉通知测试";
@@ -82,4 +106,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { loadEnv, sendDingTalkMarkdown };
+module.exports = { loadEnv, sendDingTalkMarkdown, sendDingTalkImage };
