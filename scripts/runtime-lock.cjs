@@ -5,7 +5,7 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function withLock(name, options, action) {
+async function acquireLock(name, options = {}) {
   const outputDir = path.resolve("output");
   const lockDir = path.join(outputDir, `${name}.lock`);
   const waitMs = options?.waitMs ?? 10 * 60 * 1000;
@@ -21,7 +21,14 @@ async function withLock(name, options, action) {
         pid: process.pid,
         startedAt: new Date().toISOString(),
       }, null, 2));
-      break;
+      let released = false;
+      return {
+        release() {
+          if (released) return;
+          released = true;
+          fs.rmSync(lockDir, { recursive: true, force: true });
+        },
+      };
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
 
@@ -47,12 +54,15 @@ async function withLock(name, options, action) {
       await sleep(2000);
     }
   }
+}
 
+async function withLock(name, options, action) {
+  const lock = await acquireLock(name, options);
   try {
     return await action();
   } finally {
-    fs.rmSync(lockDir, { recursive: true, force: true });
+    lock.release();
   }
 }
 
-module.exports = { withLock };
+module.exports = { acquireLock, withLock };

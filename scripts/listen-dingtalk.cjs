@@ -3,6 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
 const { DWClient, TOPIC_ROBOT } = require("dingtalk-stream");
+const { acquireLock } = require("./runtime-lock.cjs");
 
 const heartbeatPath = path.resolve("output/listener-heartbeat.json");
 const commandStatePath = path.resolve("output/listener-command-state.json");
@@ -361,6 +362,8 @@ async function submitZhimadiLoginCode(session, code) {
 
 async function closeLoginSession(session) {
   await session?.context?.close().catch(() => {});
+  if (session?.expireTimer) clearTimeout(session.expireTimer);
+  session?.profileLock?.release();
 }
 
 async function main() {
@@ -372,6 +375,23 @@ async function main() {
 
   let running = false;
   let loginSession = null;
+  let shuttingDown = false;
+
+  async function shutdown(status, code) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    writeHeartbeat(status);
+    await closeLoginSession(loginSession);
+    process.exit(code);
+  }
+
+  process.once("SIGINT", () => {
+    void shutdown("stopped", 130);
+  });
+  process.once("SIGTERM", () => {
+    void shutdown("stopped", 143);
+  });
+
   writeHeartbeat("starting");
   setInterval(() => writeHeartbeat("running"), 30000).unref();
 
@@ -381,33 +401,54 @@ async function main() {
   });
 
   async function startZhimadiCaptchaFlow(message, afterLoginReport) {
-    loginSession = await startZhimadiLoginSession();
-    if (loginSession.alreadyLoggedIn) {
-      loginSession = null;
-      await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地当前登录正常。");
-      return "already-ok";
-    }
-    loginSession.afterLoginReport = afterLoginReport;
-
-    const autoLogin = await tryAutoZhimadiLogin(loginSession);
-    if (autoLogin.ok) {
-      loginSession = null;
-      await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地已自动重新登录。");
-      if (afterLoginReport) {
-        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "正在重新生成月报。");
-        await runMonthlyReport();
+    const profileLock = await acquireLock("browser-profile", {
+      waitMs: Number(process.env.BROWSER_LOCK_WAIT_MS || 10 * 60 * 1000),
+      staleMs: Number(process.env.BROWSER_LOCK_STALE_MS || 30 * 60 * 1000),
+    });
+    try {
+      loginSession = await startZhimadiLoginSession();
+      loginSession.profileLock = profileLock;
+      if (loginSession.alreadyLoggedIn) {
+        await closeLoginSession(loginSession);
+        loginSession = null;
+        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地当前登录正常。");
+        return "already-ok";
       }
-      return "auto-ok";
+      loginSession.afterLoginReport = afterLoginReport;
+
+      const autoLogin = await tryAutoZhimadiLogin(loginSession);
+      if (autoLogin.ok) {
+        await closeLoginSession(loginSession);
+        loginSession = null;
+        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地已自动重新登录。");
+        if (afterLoginReport) {
+          await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "正在重新生成月报。");
+          await runMonthlyReport();
+        }
+        return "auto-ok";
+      }
+
+      const screenshots = await captureZhimadiCaptcha(loginSession);
+      loginSession.screenshotPath = screenshots.screenshotPath;
+      loginSession.captchaPath = screenshots.captchaPath;
+
+      const mediaId = await uploadDingTalkImage(client, loginSession.captchaPath);
+      await sendGroupImage(client, message, mediaId);
+      loginSession.expireTimer = setTimeout(async () => {
+        if (!loginSession) return;
+        await closeLoginSession(loginSession);
+        loginSession = null;
+        running = false;
+        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "验证码等待已超时。需要重新登录时，请发送：@水果店月报 登录");
+      }, loginSessionTtlMs).unref();
+      await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地需要验证码。请看上面的验证码图，回复固定格式：@水果店月报 验证码ABCD");
+      return "captcha-sent";
+    } catch (error) {
+      if (loginSession) await closeLoginSession(loginSession);
+      else profileLock.release();
+      loginSession = null;
+      throw error;
     }
-
-    const screenshots = await captureZhimadiCaptcha(loginSession);
-    loginSession.screenshotPath = screenshots.screenshotPath;
-    loginSession.captchaPath = screenshots.captchaPath;
-
-    const mediaId = await uploadDingTalkImage(client, loginSession.captchaPath);
-    await sendGroupImage(client, message, mediaId);
-    await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地需要验证码。请看上面的验证码图，回复固定格式：验证码ABCD");
-    return "captcha-sent";
   }
 
   client.registerCallbackListener(TOPIC_ROBOT, async (res) => {
@@ -428,6 +469,7 @@ async function main() {
         await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "收到验证码，正在恢复芝麻地登录。");
         await submitZhimadiLoginCode(loginSession, code);
         const afterLoginReport = loginSession.afterLoginReport;
+        await closeLoginSession(loginSession);
         loginSession = null;
         if (afterLoginReport) {
           await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地登录已恢复，正在重新生成月报。");
@@ -447,7 +489,7 @@ async function main() {
         await closeLoginSession(loginSession);
         loginSession = null;
         running = false;
-        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, `验证码登录失败：${error.message}。请重新发送 666 获取新验证码。`);
+        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, `验证码登录失败：${error.message}。请重新发送：@水果店月报 登录`);
         console.error(error.stack || error.message);
       }
       return;
@@ -525,15 +567,6 @@ async function main() {
 }
 
 if (require.main === module) {
-  process.on("SIGINT", () => {
-    writeHeartbeat("stopped");
-    process.exit(130);
-  });
-  process.on("SIGTERM", () => {
-    writeHeartbeat("stopped");
-    process.exit(143);
-  });
-
   main().catch((error) => {
     writeHeartbeat("failed");
     console.error(error.stack || error.message);

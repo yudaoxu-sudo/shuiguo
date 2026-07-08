@@ -88,7 +88,7 @@ async function main() {
   const problemKey = problems.join(",");
   if (shouldAlert(now, problemKey)) {
     const repairHint = problems.some((problem) => problem.includes("芝麻地"))
-      ? "\n\n芝麻地修复方式：在群里发送 `@水果店月报 登录`，收到验证码图后回复 `验证码ABCD`。长期方案是给服务器单独建一个芝麻地账号，避免和电脑端同账号互踢。"
+      ? "\n\n芝麻地修复方式：在群里发送 `@水果店月报 登录`，收到验证码图后回复 `@水果店月报 验证码ABCD`。长期方案是给服务器单独建一个芝麻地账号，避免和电脑端同账号互踢。"
       : "";
 
     await sendDingTalkMarkdown(
