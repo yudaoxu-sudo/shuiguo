@@ -65,10 +65,10 @@ pnpm listen
 服务器跑通后，加 cron：
 
 ```cron
-5 22 * * * cd /opt/fruit-store-report-bot && /usr/bin/pnpm report >> output/cron-report.log 2>&1
-*/5 * * * * cd /opt/fruit-store-report-bot && /usr/bin/pnpm healthcheck >> output/cron-healthcheck.log 2>&1
-7 */2 * * * cd /opt/fruit-store-report-bot && /usr/bin/pnpm login-healthcheck >> output/cron-login-healthcheck.log 2>&1
-17 9-21/3 * * * cd /opt/fruit-store-report-bot && /usr/bin/pnpm report-healthcheck >> output/cron-report-healthcheck.log 2>&1
+5 22 * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm report >> output/cron-report.log 2>&1
+*/5 * * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm healthcheck >> output/cron-healthcheck.log 2>&1
+7 */2 * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm login-healthcheck >> output/cron-login-healthcheck.log 2>&1
+17 9-21/3 * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm report-healthcheck >> output/cron-report-healthcheck.log 2>&1
 ```
 
 监听常驻用 `systemd`，模板在 `deploy/fruit-store-listener.service`。健康检查会读取 `output/listener-heartbeat.json`；超过 3 分钟没有心跳会推送钉钉告警。

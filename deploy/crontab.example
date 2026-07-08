@@ -1,11 +1,11 @@
 # 每晚 22:05 自动推送月报
-5 22 * * * cd /opt/fruit-store-report-bot && /usr/bin/pnpm report >> output/cron-report.log 2>&1
+5 22 * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm report >> output/cron-report.log 2>&1
 
 # 每 5 分钟检查一次钉钉监听是否还活着；监听死掉会推送告警
-*/5 * * * * cd /opt/fruit-store-report-bot && /usr/bin/pnpm healthcheck >> output/cron-healthcheck.log 2>&1
+*/5 * * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm healthcheck >> output/cron-healthcheck.log 2>&1
 
 # 每 2 小时检查一次后台登录态；芝麻地过期会直接触发验证码
-7 */2 * * * cd /opt/fruit-store-report-bot && /usr/bin/pnpm login-healthcheck >> output/cron-login-healthcheck.log 2>&1
+7 */2 * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm login-healthcheck >> output/cron-login-healthcheck.log 2>&1
 
 # 白天做报表预检，只验证抓取能力，不推送正式报表；失败会推送告警
-17 9-21/3 * * * cd /opt/fruit-store-report-bot && /usr/bin/pnpm report-healthcheck >> output/cron-report-healthcheck.log 2>&1
+17 9-21/3 * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm report-healthcheck >> output/cron-report-healthcheck.log 2>&1
