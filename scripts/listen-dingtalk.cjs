@@ -1,4 +1,4 @@
-const { spawn } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
@@ -340,20 +340,61 @@ async function recognizeCaptchaWithOpenAI(filePath) {
   return extractCaptchaCode(body.choices?.[0]?.message?.content);
 }
 
-async function tryAutoZhimadiLogin(session) {
-  if (!process.env.OPENAI_API_KEY) return { ok: false, reason: "missing_openai_key" };
+function ddddocrPythonCommand() {
+  if (process.env.DDDDOCR_PYTHON) return process.env.DDDDOCR_PYTHON;
 
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
+  const venvPython = path.resolve(".venv/bin/python");
+  if (fs.existsSync(venvPython)) return venvPython;
+
+  return "python3";
+}
+
+function recognizeCaptchaWithDdddocr(filePath) {
+  if (process.env.DDDDOCR_ENABLED === "false") return "";
+
+  const scriptPath = path.resolve("scripts/recognize-captcha-ddddocr.py");
+  const result = spawnSync(ddddocrPythonCommand(), [scriptPath, filePath], {
+    encoding: "utf8",
+    timeout: Number(process.env.DDDDOCR_TIMEOUT_MS || 15000),
+    env: {
+      ...process.env,
+      PYTHONIOENCODING: "utf-8",
+    },
+  });
+
+  if (result.status !== 0) {
+    const reason = String(result.stderr || result.error?.message || "").trim();
+    if (reason) console.warn(`ddddocr识别不可用: ${reason}`);
+    return "";
+  }
+
+  return extractCaptchaCode(result.stdout);
+}
+
+async function recognizeCaptcha(filePath) {
+  const ddddocrCode = recognizeCaptchaWithDdddocr(filePath);
+  if (ddddocrCode) return { code: ddddocrCode, source: "ddddocr" };
+
+  const openaiCode = await recognizeCaptchaWithOpenAI(filePath);
+  if (openaiCode) return { code: openaiCode, source: "openai" };
+
+  return { code: "", source: "none" };
+}
+
+async function tryAutoZhimadiLogin(session) {
+  const maxAttempts = Number(process.env.ZHIMADI_CAPTCHA_AUTO_ATTEMPTS || 2);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const { captchaPath } = await captureZhimadiCaptcha(session);
-    const code = await recognizeCaptchaWithOpenAI(captchaPath);
+    const { code, source } = await recognizeCaptcha(captchaPath);
     if (!code) return { ok: false, reason: "empty_code" };
 
     try {
       await submitZhimadiLoginCode(session, code);
       return { ok: true };
     } catch (error) {
-      console.warn(`验证码自动识别第 ${attempt} 次失败: ${error.message}`);
-      if (attempt === 2) return { ok: false, reason: "submit_failed" };
+      console.warn(`验证码自动识别第 ${attempt} 次失败(${source}): ${error.message}`);
+      if (attempt === maxAttempts) return { ok: false, reason: "submit_failed" };
       await session.page.locator('input[name="verify_code"]').fill("").catch(() => {});
       await session.page.locator(captchaSelector).click().catch(() => {});
       await session.page.waitForTimeout(1000);

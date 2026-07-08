@@ -30,6 +30,8 @@ cp .env.example .env
 
 ```bash
 pnpm install
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 pnpm setup-login
 pnpm report
 pnpm listen
@@ -76,3 +78,5 @@ pnpm listen
 `report-healthcheck` 会用 `NO_DINGTALK=1` 做真实抓取预检，不推送正式报表；失败时走钉钉报警。日报、登录检查和手动芝麻地登录共用 `output/browser-profile.lock`，避免多个浏览器进程同时抢同一个登录态目录。
 
 芝麻地登录过期时，登录检查或月报请求会直接触发验证码图；回复 `验证码ABCD` 即可恢复服务器登录态。
+
+可选装 ddddocr 后，监听脚本会先本地识别芝麻地的简单图形验证码；识别成功会自动提交，失败再发验证码图到钉钉让人回复。
