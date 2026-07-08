@@ -22,6 +22,33 @@ function ask(question) {
   }));
 }
 
+async function isZhimadiLoginFormVisible(page) {
+  const selectors = [
+    'input[name="account"]',
+    "#password",
+    'input[name="verify_code"]',
+  ];
+
+  for (const selector of selectors) {
+    if (await page.locator(selector).first().isVisible().catch(() => false)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function waitForZhimadiLoggedIn(page, timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await page.locator("iframe#sellSummary_customSummary, iframe[name='iframepage']").count()) > 0) return;
+    if (!(await isZhimadiLoginFormVisible(page))) return;
+    await page.waitForTimeout(1000);
+  }
+
+  const bodyText = await page.locator("body").innerText({ timeout: 2000 }).catch(() => "");
+  throw new Error(`芝麻地登录提交后仍停留在登录页：${bodyText.replace(/\s+/g, " ").slice(0, 160)}`);
+}
+
 async function main() {
   loadEnv();
 
@@ -73,7 +100,14 @@ async function main() {
         button.click();
       });
 
-      await page.waitForSelector("iframe#sellSummary_customSummary, iframe[name='iframepage']", { timeout: 60000 });
+      try {
+        await waitForZhimadiLoggedIn(page);
+      } catch (error) {
+        const failurePath = path.join(outputDir, "zhimadi-login-after-submit.png");
+        await page.screenshot({ path: failurePath, fullPage: true }).catch(() => {});
+        error.message = `${error.message}；失败截图：${failurePath}`;
+        throw error;
+      }
       await page.screenshot({ path: path.join(outputDir, "zhimadi-login-success.png"), fullPage: true });
       console.log("ZHIMADI_LOGIN_OK");
     } finally {

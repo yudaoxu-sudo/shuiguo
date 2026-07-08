@@ -228,16 +228,16 @@ async function captureZhimadiCaptcha(session) {
 }
 
 function extractCaptchaCode(text) {
-  const compact = String(text || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-  return /^[A-Z0-9]{4,6}$/.test(compact) ? compact : "";
+  const compact = String(text || "").replace(/[^A-Za-z0-9]/g, "");
+  return /^[A-Za-z0-9]{4,6}$/.test(compact) ? compact : "";
 }
 
 function extractManualCaptchaCode(text) {
-  const normalized = String(text || "").toUpperCase();
-  const labeled = normalized.match(/(?:验证码|登录)[:：]?([A-Z0-9]{4,6})/);
+  const normalized = String(text || "");
+  const labeled = normalized.match(/(?:验证码|登录)[:：]?([A-Za-z0-9]{4,6})/i);
   if (labeled) return labeled[1];
 
-  const tokens = normalized.match(/[A-Z0-9]{4,6}/g) || [];
+  const tokens = normalized.match(/[A-Za-z0-9]{4,6}/g) || [];
   return tokens.length === 1 ? tokens[0] : "";
 }
 
@@ -259,7 +259,7 @@ async function recognizeCaptchaWithOpenAI(filePath) {
         content: [
           {
             type: "text",
-            text: "Read the verification code in this image. Return only the code, 4 to 6 uppercase letters or digits. No spaces.",
+            text: "Read the verification code in this image. Return only the exact code, 4 to 6 letters or digits, preserving letter case. No spaces.",
           },
           {
             type: "image_url",
@@ -348,6 +348,33 @@ async function startZhimadiLoginSession() {
   };
 }
 
+async function isZhimadiLoginFormVisible(page) {
+  const selectors = [
+    'input[name="account"]',
+    "#password",
+    'input[name="verify_code"]',
+  ];
+
+  for (const selector of selectors) {
+    if (await page.locator(selector).first().isVisible().catch(() => false)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function waitForZhimadiLoggedIn(page, timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await page.locator("iframe#sellSummary_customSummary, iframe[name='iframepage']").count()) > 0) return;
+    if (!(await isZhimadiLoginFormVisible(page))) return;
+    await page.waitForTimeout(1000);
+  }
+
+  const bodyText = await page.locator("body").innerText({ timeout: 2000 }).catch(() => "");
+  throw new Error(`芝麻地登录提交后仍停留在登录页：${bodyText.replace(/\s+/g, " ").slice(0, 160)}`);
+}
+
 async function submitZhimadiLoginCode(session, code) {
   await session.page.locator('input[name="verify_code"]').fill(code);
   await session.page.evaluate(() => {
@@ -356,7 +383,7 @@ async function submitZhimadiLoginCode(session, code) {
     if (!button) throw new Error("找不到芝麻地登录按钮");
     button.click();
   });
-  await session.page.waitForSelector("iframe#sellSummary_customSummary, iframe[name='iframepage']", { timeout: 60000 });
+  await waitForZhimadiLoggedIn(session.page);
   await session.context.close();
 }
 
