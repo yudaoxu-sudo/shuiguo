@@ -5,6 +5,16 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isProcessRunning(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+
 async function acquireLock(name, options = {}) {
   const outputDir = path.resolve("output");
   const lockDir = path.join(outputDir, `${name}.lock`);
@@ -41,7 +51,8 @@ async function acquireLock(name, options = {}) {
       }
 
       const ownerStartedAt = owner?.startedAt ? Date.parse(owner.startedAt) : 0;
-      const stale = !ownerStartedAt || Date.now() - ownerStartedAt > staleMs;
+      const ownerPid = Number(owner?.pid);
+      const stale = !isProcessRunning(ownerPid) || !ownerStartedAt || Date.now() - ownerStartedAt > staleMs;
       if (stale) {
         fs.rmSync(lockDir, { recursive: true, force: true });
         continue;

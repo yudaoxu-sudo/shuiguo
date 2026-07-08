@@ -5,6 +5,7 @@ const { loadEnv, sendDingTalkMarkdown } = require("./send-dingtalk.cjs");
 const { withLock } = require("./runtime-lock.cjs");
 
 const statePath = path.resolve("output/login-health-state.json");
+const repairRequestPath = path.resolve("output/zhimadi-login-repair-request.json");
 const alertCooldownMs = Number(process.env.LOGIN_ALERT_COOLDOWN_MS || 6 * 60 * 60 * 1000);
 
 function readJson(filePath) {
@@ -86,9 +87,16 @@ async function main() {
   }
 
   const problemKey = problems.join(",");
+  if (problems.some((problem) => problem.includes("芝麻地"))) {
+    writeJson(repairRequestPath, {
+      requestedAt: new Date(now).toISOString(),
+      reason: "login-healthcheck",
+    });
+  }
+
   if (shouldAlert(now, problemKey)) {
     const repairHint = problems.some((problem) => problem.includes("芝麻地"))
-      ? "\n\n芝麻地修复方式：在群里发送 `@水果店月报 登录`，收到验证码图后回复 `@水果店月报 验证码ABCD`。长期方案是给服务器单独建一个芝麻地账号，避免和电脑端同账号互踢。"
+      ? "\n\n已自动请求发送芝麻地图形验证码。收到验证码图后回复 `验证码ABCD`；如果 10 秒内没有反应，回复 `@水果店月报 验证码ABCD`。"
       : "";
 
     await sendDingTalkMarkdown(

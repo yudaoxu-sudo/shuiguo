@@ -4,9 +4,13 @@ const path = require("path");
 const { chromium } = require("playwright");
 const { DWClient, TOPIC_ROBOT } = require("dingtalk-stream");
 const { acquireLock } = require("./runtime-lock.cjs");
+const { sendDingTalkMarkdown } = require("./send-dingtalk.cjs");
 
 const heartbeatPath = path.resolve("output/listener-heartbeat.json");
 const commandStatePath = path.resolve("output/listener-command-state.json");
+const groupContextPath = path.resolve("output/listener-group-context.json");
+const repairRequestPath = path.resolve("output/zhimadi-login-repair-request.json");
+const repairStatePath = path.resolve("output/zhimadi-login-repair-state.json");
 const duplicateWindowMs = 3 * 60 * 1000;
 const loginSessionTtlMs = 5 * 60 * 1000;
 const captchaSelector = "#verifyCode";
@@ -71,6 +75,36 @@ function loadCommandState() {
   } catch {
     return { commands: [] };
   }
+}
+
+function readJson(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeJson(filePath, data) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+}
+
+function saveGroupContext(message) {
+  if (!message?.conversationId || !message?.robotCode) return;
+  writeJson(groupContextPath, {
+    conversationId: message.conversationId,
+    robotCode: message.robotCode,
+    sessionWebhook: message.sessionWebhook || "",
+    senderStaffId: message.senderStaffId || "",
+    savedAt: new Date().toISOString(),
+  });
+}
+
+function loadGroupContext() {
+  const context = readJson(groupContextPath);
+  if (!context?.conversationId || !context?.robotCode) return null;
+  return context;
 }
 
 function rememberCommand(key) {
@@ -216,15 +250,30 @@ async function captureZhimadiCaptcha(session) {
 
   const screenshotPath = path.join(outputDir, "zhimadi-login-current.png");
   const captchaPath = path.join(outputDir, "zhimadi-captcha-current.png");
+  fs.rmSync(captchaPath, { force: true });
+
+  const captcha = await waitForCaptchaReady(session.page);
   await session.page.screenshot({ path: screenshotPath, fullPage: true });
+  await captcha.screenshot({ path: captchaPath });
+  return { screenshotPath, captchaPath };
+}
 
-  const captcha = session.page.locator(captchaSelector);
-  if (await captcha.count()) {
-    await captcha.screenshot({ path: captchaPath });
-    return { screenshotPath, captchaPath };
-  }
-
-  return { screenshotPath, captchaPath: screenshotPath };
+async function waitForCaptchaReady(page) {
+  const captcha = page.locator(captchaSelector).first();
+  await captcha.waitFor({ state: "visible", timeout: 15000 });
+  await page.waitForFunction((selector) => {
+    const element = document.querySelector(selector);
+    if (!element) return false;
+    const rect = element.getBoundingClientRect();
+    if (rect.width < 40 || rect.height < 20) return false;
+    if (element.tagName.toLowerCase() === "img") {
+      return element.complete && element.naturalWidth > 0 && element.naturalHeight > 0;
+    }
+    const style = window.getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden";
+  }, captchaSelector, { timeout: 15000 });
+  await page.waitForTimeout(800);
+  return captcha;
 }
 
 function extractCaptchaCode(text) {
@@ -478,9 +527,77 @@ async function main() {
     }
   }
 
+  async function handleAutoRepairRequest() {
+    if (running || loginSession) return;
+
+    const request = readJson(repairRequestPath);
+    if (!request?.requestedAt) return;
+
+    const state = readJson(repairStatePath);
+    if (state?.handledRequestAt === request.requestedAt) return;
+
+    const context = loadGroupContext();
+    if (!context) {
+      writeJson(repairStatePath, {
+        status: "missing_group_context",
+        requestAt: request.requestedAt,
+        handledAt: new Date().toISOString(),
+      });
+      return;
+    }
+
+    running = true;
+    writeJson(repairStatePath, {
+      status: "starting",
+      handledRequestAt: request.requestedAt,
+      handledAt: new Date().toISOString(),
+    });
+
+    try {
+      await sendDingTalkMarkdown(
+        "水果店登录异常",
+        "### 水果店登录异常\n\n检测到芝麻地登录态失效，正在自动发送验证码图。\n\n收到图后回复：`验证码ABCD`\n\n如果 10 秒内没有反应，回复：`@水果店月报 验证码ABCD`",
+        { alert: true },
+      ).catch((error) => {
+        console.warn(`自动修复提示发送失败：${error.message}`);
+      });
+
+      const result = await startZhimadiCaptchaFlow(context, false);
+      writeJson(repairStatePath, {
+        status: result,
+        handledRequestAt: request.requestedAt,
+        handledAt: new Date().toISOString(),
+      });
+      if (result !== "captcha-sent") running = false;
+    } catch (error) {
+      loginSession = null;
+      running = false;
+      writeJson(repairStatePath, {
+        status: "failed",
+        handledRequestAt: request.requestedAt,
+        handledAt: new Date().toISOString(),
+        error: error.message,
+      });
+      await sendDingTalkMarkdown(
+        "水果店登录修复失败",
+        `### 水果店登录修复失败\n\n${error.message}`,
+        { alert: true },
+      ).catch((sendError) => {
+        console.warn(`自动修复失败通知发送失败：${sendError.message}`);
+      });
+    }
+  }
+
+  setInterval(() => {
+    handleAutoRepairRequest().catch((error) => {
+      console.error(error.stack || error.message);
+    });
+  }, Number(process.env.AUTO_REPAIR_POLL_MS || 15000)).unref();
+
   client.registerCallbackListener(TOPIC_ROBOT, async (res) => {
     writeHeartbeat("message");
     const message = JSON.parse(res.data);
+    saveGroupContext(message);
     const text = messageText(message);
 
     if (loginSession && Date.now() > loginSession.expiresAt) {

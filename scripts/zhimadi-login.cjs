@@ -5,6 +5,8 @@ const { chromium } = require("playwright");
 const { loadEnv } = require("./send-dingtalk.cjs");
 const { withLock } = require("./runtime-lock.cjs");
 
+const captchaSelector = "#verifyCode";
+
 function chromeExecutablePath() {
   if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
 
@@ -49,6 +51,24 @@ async function waitForZhimadiLoggedIn(page, timeoutMs = 60000) {
   throw new Error(`芝麻地登录提交后仍停留在登录页：${bodyText.replace(/\s+/g, " ").slice(0, 160)}`);
 }
 
+async function waitForCaptchaReady(page) {
+  const captcha = page.locator(captchaSelector).first();
+  await captcha.waitFor({ state: "visible", timeout: 15000 });
+  await page.waitForFunction((selector) => {
+    const element = document.querySelector(selector);
+    if (!element) return false;
+    const rect = element.getBoundingClientRect();
+    if (rect.width < 40 || rect.height < 20) return false;
+    if (element.tagName.toLowerCase() === "img") {
+      return element.complete && element.naturalWidth > 0 && element.naturalHeight > 0;
+    }
+    const style = window.getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden";
+  }, captchaSelector, { timeout: 15000 });
+  await page.waitForTimeout(800);
+  return captcha;
+}
+
 async function main() {
   loadEnv();
 
@@ -88,8 +108,12 @@ async function main() {
       }
 
       const screenshotPath = path.join(outputDir, "zhimadi-login-current.png");
+      const captchaPath = path.join(outputDir, "zhimadi-captcha-current.png");
+      const captcha = await waitForCaptchaReady(page);
       await page.screenshot({ path: screenshotPath, fullPage: true });
+      await captcha.screenshot({ path: captchaPath });
       console.log(`验证码截图：${screenshotPath}`);
+      console.log(`验证码小图：${captchaPath}`);
 
       const code = await ask("请输入芝麻地图形验证码：");
       await page.locator('input[name="verify_code"]').fill(code);
