@@ -67,7 +67,7 @@ pnpm listen
 ```cron
 5 22 * * * cd /opt/fruit-store-report-bot && /usr/bin/pnpm report >> output/cron-report.log 2>&1
 */5 * * * * cd /opt/fruit-store-report-bot && /usr/bin/pnpm healthcheck >> output/cron-healthcheck.log 2>&1
-*/20 * * * * cd /opt/fruit-store-report-bot && /usr/bin/pnpm login-healthcheck >> output/cron-login-healthcheck.log 2>&1
+7 */2 * * * cd /opt/fruit-store-report-bot && /usr/bin/pnpm login-healthcheck >> output/cron-login-healthcheck.log 2>&1
 17 9-21/3 * * * cd /opt/fruit-store-report-bot && /usr/bin/pnpm report-healthcheck >> output/cron-report-healthcheck.log 2>&1
 ```
 
@@ -75,4 +75,4 @@ pnpm listen
 
 `report-healthcheck` 会用 `NO_DINGTALK=1` 做真实抓取预检，不推送正式报表；失败时走钉钉报警。日报、登录检查和手动芝麻地登录共用 `output/browser-profile.lock`，避免多个浏览器进程同时抢同一个登录态目录。
 
-芝麻地登录过期时，在钉钉群里发送 `@水果店月报 登录`，机器人会发送验证码图；按 `@水果店月报 验证码ABCD` 格式回复即可恢复服务器登录态。
+芝麻地登录过期时，登录检查或月报请求会直接触发验证码图；回复 `验证码ABCD` 即可恢复服务器登录态。

@@ -87,29 +87,30 @@ async function main() {
   }
 
   const problemKey = problems.join(",");
-  if (problems.some((problem) => problem.includes("芝麻地"))) {
+  const zhimadiFailed = problems.some((problem) => problem.includes("芝麻地"));
+  const alertProblems = problems.filter((problem) => !problem.includes("芝麻地"));
+
+  if (zhimadiFailed) {
     writeJson(repairRequestPath, {
       requestedAt: new Date(now).toISOString(),
       reason: "login-healthcheck",
     });
   }
 
-  if (shouldAlert(now, problemKey)) {
-    const repairHint = problems.some((problem) => problem.includes("芝麻地"))
-      ? "\n\n已自动请求发送芝麻地图形验证码。收到验证码图后回复 `验证码ABCD`；如果 10 秒内没有反应，回复 `@水果店月报 验证码ABCD`。"
-      : "";
-
+  let alerted = false;
+  if (alertProblems.length > 0 && shouldAlert(now, alertProblems.join(","))) {
     await sendDingTalkMarkdown(
       "水果店登录态异常",
-      `### 水果店登录态异常\n\n${problems.map((problem) => `- ${problem}`).join("\n")}${repairHint}`,
+      `### 水果店登录态异常\n\n${alertProblems.map((problem) => `- ${problem}`).join("\n")}`,
       { alert: true },
     );
+    alerted = true;
   }
 
   writeJson(statePath, {
     status: "failed",
     lastCheckAt: new Date(now).toISOString(),
-    lastAlertAt: new Date(now).toISOString(),
+    lastAlertAt: alerted ? new Date(now).toISOString() : readJson(statePath)?.lastAlertAt || null,
     lastProblemKey: problemKey,
     problems,
   });

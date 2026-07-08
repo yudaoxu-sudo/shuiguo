@@ -524,9 +524,8 @@ async function main() {
         await closeLoginSession(loginSession);
         loginSession = null;
         running = false;
-        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "验证码等待已超时。需要重新登录时，请发送：@水果店月报 登录");
       }, loginSessionTtlMs).unref();
-      await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地需要验证码。请看上面的验证码图，回复固定格式：@水果店月报 验证码ABCD");
+      await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "回复：验证码ABCD");
       return "captcha-sent";
     } catch (error) {
       if (loginSession) await closeLoginSession(loginSession);
@@ -555,14 +554,6 @@ async function main() {
     });
 
     try {
-      await sendDingTalkMarkdown(
-        "水果店登录异常",
-        "### 水果店登录异常\n\n检测到芝麻地登录态失效，正在自动发送验证码图。\n\n收到图后回复：`验证码ABCD`\n\n如果 10 秒内没有反应，回复：`@水果店月报 验证码ABCD`",
-        { alert: true },
-      ).catch((error) => {
-        console.warn(`自动修复提示发送失败：${error.message}`);
-      });
-
       const result = await startZhimadiCaptchaFlow(context, false);
       writeJson(repairStatePath, {
         status: result,
@@ -611,13 +602,12 @@ async function main() {
     if (loginSession && manualCaptchaCode) {
       const code = manualCaptchaCode;
       try {
-        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "收到验证码，正在恢复芝麻地登录。");
         await submitZhimadiLoginCode(loginSession, code);
         const afterLoginReport = loginSession.afterLoginReport;
         await closeLoginSession(loginSession);
         loginSession = null;
         if (afterLoginReport) {
-          await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地登录已恢复，正在重新生成月报。");
+          await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "登录已恢复，继续生成月报。");
           running = true;
           runMonthlyReport()
             .catch((error) => {
@@ -628,13 +618,13 @@ async function main() {
             });
         } else {
           running = false;
-          await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地登录已恢复。");
+          await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "登录已恢复。");
         }
       } catch (error) {
         await closeLoginSession(loginSession);
         loginSession = null;
         running = false;
-        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, `验证码登录失败：${error.message}。请重新发送：@水果店月报 登录`);
+        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, `验证码失败：${error.message}`);
         console.error(error.stack || error.message);
       }
       return;
@@ -642,13 +632,12 @@ async function main() {
 
     if (text.includes("登录")) {
       if (running) {
-        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "当前有任务正在运行，稍等后再发 登录。");
+        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "当前有任务正在运行。");
         return;
       }
 
       running = true;
       try {
-        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "正在检查芝麻地登录态。");
         const result = await startZhimadiCaptchaFlow(message, false);
         if (result !== "captcha-sent") running = false;
       } catch (error) {
