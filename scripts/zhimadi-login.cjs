@@ -4,6 +4,7 @@ const readline = require("readline");
 const { chromium } = require("playwright");
 const { loadEnv } = require("./send-dingtalk.cjs");
 const { withLock } = require("./runtime-lock.cjs");
+const { gotoZhimadi, isZhimadiAuthenticated } = require("./zhimadi-navigation.cjs");
 
 const captchaSelector = "#verifyCode";
 
@@ -89,13 +90,9 @@ async function main() {
 
     const page = context.pages()[0] || await context.newPage();
     try {
-      await page.goto(process.env.ZHIMADI_URL || "https://aems.zhimadi.cn/index.php?s=/Index/index.html", {
-        waitUntil: "domcontentloaded",
-        timeout: 60000,
-      });
-      await page.waitForTimeout(1500);
+      await gotoZhimadi(page);
 
-      if ((await page.locator("iframe#sellSummary_customSummary, iframe[name='iframepage']").count()) > 0) {
+      if (await isZhimadiAuthenticated(page)) {
         console.log("ZHIMADI_LOGIN_OK");
         return;
       }

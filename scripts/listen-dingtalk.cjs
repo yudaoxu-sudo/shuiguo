@@ -4,6 +4,7 @@ const path = require("path");
 const { chromium } = require("playwright");
 const { DWClient, TOPIC_ROBOT } = require("dingtalk-stream");
 const { acquireLock } = require("./runtime-lock.cjs");
+const { gotoZhimadi, isZhimadiAuthenticated } = require("./zhimadi-navigation.cjs");
 const { sendDingTalkImage, sendDingTalkMarkdown } = require("./send-dingtalk.cjs");
 
 const heartbeatPath = path.resolve("output/listener-heartbeat.json");
@@ -417,13 +418,9 @@ async function startZhimadiLoginSession() {
   });
 
   const page = context.pages()[0] || await context.newPage();
-  await page.goto(process.env.ZHIMADI_URL || "https://aems.zhimadi.cn/index.php?s=/Index/index.html", {
-    waitUntil: "domcontentloaded",
-    timeout: 60000,
-  });
-  await page.waitForTimeout(1500);
+  await gotoZhimadi(page);
 
-  if ((await page.locator("iframe#sellSummary_customSummary, iframe[name='iframepage']").count()) > 0) {
+  if (await isZhimadiAuthenticated(page)) {
     await context.close();
     return { alreadyLoggedIn: true };
   }

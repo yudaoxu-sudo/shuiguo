@@ -5,6 +5,7 @@ const { chromium } = require("playwright");
 const { parseZhimadiText, buildMarkdown } = require("./read-current-zhimadi.cjs");
 const { parseLemengMonthlyText } = require("./read-current-lemeng.cjs");
 const { withLock } = require("./runtime-lock.cjs");
+const { gotoZhimadi } = require("./zhimadi-navigation.cjs");
 
 function loadEnv() {
   const envPath = path.resolve(".env");
@@ -137,7 +138,7 @@ async function retryStep(name, action, attempts = 3) {
 }
 
 async function readZhimadi(page) {
-  await page.goto(process.env.ZHIMADI_URL || "https://aems.zhimadi.cn/index.php?s=/Index/index.html", { waitUntil: "domcontentloaded" });
+  await gotoZhimadi(page, { readiness: "report" });
 
   if (await isLoginPage(page)) {
     throw new Error("芝麻地登录态失效，需要运行 pnpm zhimadi:login 并按提示输入图形验证码");

@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
+const { gotoZhimadi } = require("./zhimadi-navigation.cjs");
 
 function loadEnv() {
   const envPath = path.resolve(".env");
@@ -27,7 +28,7 @@ function chromeExecutablePath() {
 }
 
 async function waitForZhimadiLogin(page) {
-  await page.goto(process.env.ZHIMADI_URL || "https://aems.zhimadi.cn/index.php?s=/Index/index.html", { waitUntil: "domcontentloaded" });
+  await gotoZhimadi(page);
 
   if ((await page.locator('input[name="account"]').count()) === 1 && process.env.ZHIMADI_USERNAME) {
     await page.locator('input[name="account"]').fill(process.env.ZHIMADI_USERNAME);

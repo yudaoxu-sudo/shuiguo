@@ -3,6 +3,7 @@ const path = require("path");
 const { chromium } = require("playwright");
 const { loadEnv, sendDingTalkMarkdown } = require("./send-dingtalk.cjs");
 const { withLock } = require("./runtime-lock.cjs");
+const { gotoZhimadi, isZhimadiAuthenticated } = require("./zhimadi-navigation.cjs");
 
 const statePath = path.resolve("output/login-health-state.json");
 const repairRequestPath = path.resolve("output/zhimadi-login-repair-request.json");
@@ -34,12 +35,8 @@ function chromeExecutablePath() {
 }
 
 async function zhimadiOk(page) {
-  await page.goto(process.env.ZHIMADI_URL || "https://aems.zhimadi.cn/index.php?s=/Index/index.html", {
-    waitUntil: "domcontentloaded",
-    timeout: 60000,
-  });
-  await page.waitForTimeout(1500);
-  return (await page.locator("input[type='password']").count()) === 0;
+  await gotoZhimadi(page);
+  return isZhimadiAuthenticated(page);
 }
 
 async function lemengOk(page) {
