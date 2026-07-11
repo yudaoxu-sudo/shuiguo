@@ -77,6 +77,16 @@ async function main() {
     const message = String(error.message || error).slice(0, 1200);
     const problemKey = message.slice(0, 200);
 
+    if (message.includes("芝麻地验证码已发送到钉钉")) {
+      writeJson(statePath, {
+        status: "waiting-login-captcha",
+        lastCheckAt: new Date(now).toISOString(),
+        message,
+      });
+      console.log("report-waiting-login-captcha");
+      return;
+    }
+
     if (shouldAlert(now, problemKey)) {
       await sendDingTalkMarkdown(
         "水果店报表预检失败",

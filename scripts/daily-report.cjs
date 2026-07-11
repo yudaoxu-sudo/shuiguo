@@ -7,6 +7,9 @@ const { parseLemengMonthlyText } = require("./read-current-lemeng.cjs");
 const { withLock } = require("./runtime-lock.cjs");
 const { gotoZhimadi } = require("./zhimadi-navigation.cjs");
 
+const repairRequestPath = path.resolve("output/zhimadi-login-repair-request.json");
+const repairStatePath = path.resolve("output/zhimadi-login-repair-state.json");
+
 function loadEnv() {
   const envPath = path.resolve(".env");
   if (!fs.existsSync(envPath)) return;
@@ -85,6 +88,58 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function readJson(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeJson(filePath, data) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+}
+
+function isZhimadiLoginError(error) {
+  return String(error?.message || error).includes("芝麻地登录态失效");
+}
+
+async function waitForZhimadiRepair(requestedAt) {
+  const timeoutMs = Number(process.env.ZHIMADI_AUTO_REPAIR_TIMEOUT_MS || 3 * 60 * 1000);
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const state = readJson(repairStatePath);
+    if (state?.handledRequestAt === requestedAt) {
+      if (["auto-ok", "already-ok"].includes(state.status)) return state;
+      if (state.status === "captcha-sent") {
+        const error = new Error("芝麻地验证码已发送到钉钉，请回复：验证码ABCD");
+        error.code = "ZHIMADI_CAPTCHA_SENT";
+        throw error;
+      }
+      if (state.status === "failed") {
+        throw new Error(`芝麻地自动登录修复失败：${state.error || "未知错误"}`);
+      }
+    }
+    await delay(2000);
+  }
+
+  throw new Error(`等待芝麻地自动登录修复超时 ${Math.round(timeoutMs / 1000)} 秒`);
+}
+
+async function repairZhimadiLogin() {
+  const requestedAt = new Date().toISOString();
+  const previewOnly = process.env.NO_DINGTALK === "1" || process.env.NO_DINGTALK === "true";
+  writeJson(repairRequestPath, {
+    requestedAt,
+    reason: "report-login-expired",
+    afterLoginReport: !previewOnly,
+  });
+  console.warn("检测到芝麻地登录态失效，正在触发自动登录修复");
+  return waitForZhimadiRepair(requestedAt);
+}
+
 function safeName(value) {
   return String(value).replace(/[^A-Za-z0-9_-]/g, "-");
 }
@@ -130,6 +185,7 @@ async function retryStep(name, action, attempts = 3) {
     } catch (error) {
       lastError = error;
       console.warn(`${name}第 ${attempt} 次失败：${error.message}`);
+      if (isZhimadiLoginError(error)) throw error;
       if (attempt < attempts) await delay(5000);
     }
   }
@@ -344,11 +400,7 @@ async function sendDingTalk(markdown, options = {}) {
   console.log(result);
 }
 
-async function main() {
-  loadEnv();
-  const outputDir = path.resolve("output");
-  fs.mkdirSync(outputDir, { recursive: true });
-
+async function runReportOnce(outputDir) {
   await withLock("browser-profile", {
     waitMs: Number(process.env.BROWSER_LOCK_WAIT_MS || 10 * 60 * 1000),
     staleMs: Number(process.env.BROWSER_LOCK_STALE_MS || 30 * 60 * 1000),
@@ -371,12 +423,31 @@ async function main() {
   });
 }
 
+async function main() {
+  loadEnv();
+  const outputDir = path.resolve("output");
+  fs.mkdirSync(outputDir, { recursive: true });
+
+  try {
+    await runReportOnce(outputDir);
+  } catch (error) {
+    const listenerManaged = process.env.REPORT_MANAGED_BY_LISTENER === "1";
+    if (!isZhimadiLoginError(error) || listenerManaged) throw error;
+
+    const repair = await repairZhimadiLogin();
+    console.log(`芝麻地自动登录修复完成：${repair.status}，重新生成报表`);
+    await runReportOnce(outputDir);
+  }
+}
+
 if (require.main === module) {
   main().catch(async (error) => {
     loadEnv();
-    const message = `### 水果店月度报表失败\n\n${error.message || error}`;
-    await sendDingTalk(message, { alert: true }).catch(() => {});
+    if (error.code !== "ZHIMADI_CAPTCHA_SENT") {
+      const message = `### 水果店月度报表失败\n\n${error.message || error}`;
+      await sendDingTalk(message, { alert: true }).catch(() => {});
+    }
     console.error(error.stack || error.message);
-    process.exit(1);
+    process.exit(error.code === "ZHIMADI_CAPTCHA_SENT" ? 2 : 1);
   });
 }

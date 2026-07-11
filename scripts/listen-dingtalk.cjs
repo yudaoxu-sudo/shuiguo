@@ -151,7 +151,7 @@ function runMonthlyReport() {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["scripts/daily-report.cjs"], {
       cwd: process.cwd(),
-      env: process.env,
+      env: { ...process.env, REPORT_MANAGED_BY_LISTENER: "1" },
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -524,7 +524,10 @@ async function main() {
     clientSecret: process.env.DINGTALK_CLIENT_SECRET,
   });
 
-  async function startZhimadiCaptchaFlow(message, afterLoginReport) {
+  async function startZhimadiCaptchaFlow(message, options = {}) {
+    const afterLoginReport = options.afterLoginReport === true;
+    const autoReport = options.autoReport ?? afterLoginReport;
+    const notifyAutoSuccess = options.notifyAutoSuccess !== false;
     const profileLock = await acquireLock("browser-profile", {
       waitMs: Number(process.env.BROWSER_LOCK_WAIT_MS || 10 * 60 * 1000),
       staleMs: Number(process.env.BROWSER_LOCK_STALE_MS || 30 * 60 * 1000),
@@ -535,7 +538,9 @@ async function main() {
       if (loginSession.alreadyLoggedIn) {
         await closeLoginSession(loginSession);
         loginSession = null;
-        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地当前登录正常。");
+        if (notifyAutoSuccess) {
+          await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地当前登录正常。");
+        }
         return "already-ok";
       }
       loginSession.afterLoginReport = afterLoginReport;
@@ -544,8 +549,10 @@ async function main() {
       if (autoLogin.ok) {
         await closeLoginSession(loginSession);
         loginSession = null;
-        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地已自动重新登录。");
-        if (afterLoginReport) {
+        if (notifyAutoSuccess) {
+          await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地已自动重新登录。");
+        }
+        if (autoReport) {
           await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "正在重新生成月报。");
           await runMonthlyReport();
         }
@@ -592,7 +599,11 @@ async function main() {
     });
 
     try {
-      const result = await startZhimadiCaptchaFlow(context, false);
+      const result = await startZhimadiCaptchaFlow(context, {
+        afterLoginReport: request.afterLoginReport === true,
+        autoReport: false,
+        notifyAutoSuccess: false,
+      });
       writeJson(repairStatePath, {
         status: result,
         handledRequestAt: request.requestedAt,
@@ -676,7 +687,7 @@ async function main() {
 
       running = true;
       try {
-        const result = await startZhimadiCaptchaFlow(message, false);
+        const result = await startZhimadiCaptchaFlow(message);
         if (result !== "captcha-sent") running = false;
       } catch (error) {
         await closeLoginSession(loginSession);
@@ -711,7 +722,7 @@ async function main() {
       .catch(async (error) => {
         if (String(error.output || error.message).includes("芝麻地登录态失效")) {
           try {
-            await startZhimadiCaptchaFlow(message, true);
+            await startZhimadiCaptchaFlow(message, { afterLoginReport: true });
             return;
           } catch (loginError) {
             await closeLoginSession(loginSession);
