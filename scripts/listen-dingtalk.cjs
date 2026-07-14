@@ -382,13 +382,24 @@ async function recognizeCaptcha(filePath) {
   return { code: "", source: "none" };
 }
 
+async function refreshZhimadiCaptcha(session) {
+  await session.page.locator('input[name="verify_code"]').fill("").catch(() => {});
+  await session.page.locator(captchaSelector).click().catch(() => {});
+  await session.page.waitForTimeout(1000);
+}
+
 async function tryAutoZhimadiLogin(session) {
   const maxAttempts = Number(process.env.ZHIMADI_CAPTCHA_AUTO_ATTEMPTS || 2);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const { captchaPath } = await captureZhimadiCaptcha(session);
     const { code, source } = await recognizeCaptcha(captchaPath);
-    if (!code) return { ok: false, reason: "empty_code" };
+    if (!code) {
+      console.warn(`验证码自动识别第 ${attempt} 次无有效结果`);
+      if (attempt === maxAttempts) return { ok: false, reason: "empty_code" };
+      await refreshZhimadiCaptcha(session);
+      continue;
+    }
 
     try {
       await submitZhimadiLoginCode(session, code);
@@ -396,9 +407,7 @@ async function tryAutoZhimadiLogin(session) {
     } catch (error) {
       console.warn(`验证码自动识别第 ${attempt} 次失败(${source}): ${error.message}`);
       if (attempt === maxAttempts) return { ok: false, reason: "submit_failed" };
-      await session.page.locator('input[name="verify_code"]').fill("").catch(() => {});
-      await session.page.locator(captchaSelector).click().catch(() => {});
-      await session.page.waitForTimeout(1000);
+      await refreshZhimadiCaptcha(session);
     }
   }
 
