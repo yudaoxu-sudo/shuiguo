@@ -397,6 +397,14 @@ async function sendDingTalk(markdown, options = {}) {
   if (!response.ok) {
     throw new Error(`钉钉推送失败: ${response.status} ${result}`);
   }
+  try {
+    const parsed = JSON.parse(result);
+    if (Number(parsed.errcode) !== 0) {
+      throw new Error(`钉钉推送失败: ${result}`);
+    }
+  } catch (error) {
+    if (error.message.startsWith("钉钉推送失败:")) throw error;
+  }
   console.log(result);
 }
 
@@ -443,7 +451,8 @@ async function main() {
 if (require.main === module) {
   main().catch(async (error) => {
     loadEnv();
-    if (error.code !== "ZHIMADI_CAPTCHA_SENT") {
+    const failureAlertsEnabled = process.env.REPORT_FAILURE_ALERTS !== "false";
+    if (error.code !== "ZHIMADI_CAPTCHA_SENT" && failureAlertsEnabled) {
       const message = `### 水果店月度报表失败\n\n${error.message || error}`;
       await sendDingTalk(message, { alert: true }).catch(() => {});
     }

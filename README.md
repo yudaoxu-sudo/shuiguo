@@ -67,7 +67,9 @@ pnpm listen
 服务器跑通后，加 cron：
 
 ```cron
-5 22 * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm report >> output/cron-report.log 2>&1
+5,20,35,50 22 * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm report:scheduled >> output/cron-report.log 2>&1
+5,20,35 23 * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm report:scheduled >> output/cron-report.log 2>&1
+50 23 * * * ubuntu cd /opt/fruit-store-report-bot && SCHEDULED_REPORT_FINAL_ATTEMPT=1 /usr/bin/pnpm report:scheduled >> output/cron-report.log 2>&1
 */5 * * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm healthcheck >> output/cron-healthcheck.log 2>&1
 7 */2 * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm login-healthcheck >> output/cron-login-healthcheck.log 2>&1
 17 9-21/3 * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm report-healthcheck >> output/cron-report-healthcheck.log 2>&1
@@ -76,6 +78,8 @@ pnpm listen
 监听常驻用 `systemd`，模板在 `deploy/fruit-store-listener.service`。健康检查会读取 `output/listener-heartbeat.json`；超过 3 分钟没有心跳会推送钉钉告警。
 
 `report-healthcheck` 会用 `NO_DINGTALK=1` 做真实抓取预检，不推送正式报表；失败时走钉钉报警。日报、登录检查和手动芝麻地登录共用 `output/browser-profile.lock`，避免多个浏览器进程同时抢同一个登录态目录。
+
+`report:scheduled` 从 22:05 到 23:50 每 15 分钟获得一次执行机会。当天推送成功后会写入 `output/scheduled-report-state.json`，后续任务直接跳过，避免重复推送；全部补跑失败时只在最后一轮发送一次告警。
 
 芝麻地登录过期时，登录检查或月报请求会直接触发验证码图；回复 `验证码ABCD` 即可恢复服务器登录态。
 

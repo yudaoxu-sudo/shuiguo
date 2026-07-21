@@ -46,6 +46,17 @@ function dingTalkAtConfig(alert) {
   };
 }
 
+function assertDingTalkSuccess(result, label) {
+  try {
+    const parsed = JSON.parse(result);
+    if (Number(parsed.errcode) !== 0) {
+      throw new Error(`${label}: ${result}`);
+    }
+  } catch (error) {
+    if (error.message.startsWith(`${label}:`)) throw error;
+  }
+}
+
 async function sendDingTalkMarkdown(title, text, options = {}) {
   const payload = {
     msgtype: "markdown",
@@ -64,6 +75,7 @@ async function sendDingTalkMarkdown(title, text, options = {}) {
   if (!response.ok) {
     throw new Error(`钉钉推送失败: ${response.status} ${result}`);
   }
+  assertDingTalkSuccess(result, "钉钉推送失败");
 
   return result;
 }
@@ -88,6 +100,7 @@ async function sendDingTalkImage(filePath) {
   if (!response.ok) {
     throw new Error(`钉钉图片推送失败: ${response.status} ${result}`);
   }
+  assertDingTalkSuccess(result, "钉钉图片推送失败");
 
   return result;
 }

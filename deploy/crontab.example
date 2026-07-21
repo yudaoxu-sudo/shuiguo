@@ -1,5 +1,7 @@
-# 每晚 22:05 自动推送月报
-5 22 * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm report >> output/cron-report.log 2>&1
+# 每晚 22:05 开始自动推送；网站短时异常时每 15 分钟补跑，成功后当日其余任务自动跳过
+5,20,35,50 22 * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm report:scheduled >> output/cron-report.log 2>&1
+5,20,35 23 * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm report:scheduled >> output/cron-report.log 2>&1
+50 23 * * * ubuntu cd /opt/fruit-store-report-bot && SCHEDULED_REPORT_FINAL_ATTEMPT=1 /usr/bin/pnpm report:scheduled >> output/cron-report.log 2>&1
 
 # 每 5 分钟检查一次钉钉监听是否还活着；监听死掉会推送告警
 */5 * * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm healthcheck >> output/cron-healthcheck.log 2>&1

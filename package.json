@@ -12,6 +12,7 @@
     "report-healthcheck": "node scripts/check-report-health.cjs",
     "notify": "node scripts/send-dingtalk.cjs",
     "report": "node scripts/daily-report.cjs",
+    "report:scheduled": "node scripts/run-scheduled-report.cjs",
     "zhimadi:current": "node scripts/read-current-zhimadi.cjs",
     "lemeng:current": "node scripts/read-current-lemeng.cjs"
   },
