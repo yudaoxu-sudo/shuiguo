@@ -105,6 +105,13 @@ function isZhimadiLoginError(error) {
   return String(error?.message || error).includes("芝麻地登录态失效");
 }
 
+function isZhimadiPageLoadError(error) {
+  const message = String(error?.message || error);
+  return message.includes("芝麻地主界面加载超时")
+    || message.includes("芝麻地销售汇总加载超时")
+    || message.includes("芝麻地报表刷新按钮未加载");
+}
+
 async function waitForZhimadiRepair(requestedAt) {
   const timeoutMs = Number(process.env.ZHIMADI_AUTO_REPAIR_TIMEOUT_MS || 3 * 60 * 1000);
   const deadline = Date.now() + timeoutMs;
@@ -194,6 +201,25 @@ async function retryStep(name, action, attempts = 3) {
 }
 
 async function readZhimadi(page) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      return await readZhimadiOnce(page);
+    } catch (error) {
+      lastError = error;
+      if (attempt === 2 || !isZhimadiPageLoadError(error)) throw error;
+
+      console.warn(`芝麻地页面半加载，执行浏览器整页刷新：${error.message}`);
+      await page.reload({ waitUntil: "commit", timeout: 60000 }).catch(() => {});
+      await page.waitForTimeout(5000);
+    }
+  }
+
+  throw lastError;
+}
+
+async function readZhimadiOnce(page) {
   await gotoZhimadi(page, { readiness: "report" });
 
   if (await isLoginPage(page)) {
@@ -250,7 +276,11 @@ async function waitForZhimadiSummary(frame) {
     }
 
     if (!refreshed && Date.now() - startedAt > 40000) {
-      await clickByText(frame, "刷新").catch(() => {});
+      const refreshButton = frame.getByText("刷新", { exact: true });
+      if ((await refreshButton.count()) !== 1) {
+        throw new Error(`芝麻地报表刷新按钮未加载：${lastText.slice(0, 200).replace(/\s+/g, " ")}`);
+      }
+      await refreshButton.click();
       await frame.waitForTimeout(2000);
       await clickByText(frame, "查询").catch(() => {});
       refreshed = true;
