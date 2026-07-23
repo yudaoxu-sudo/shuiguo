@@ -73,6 +73,22 @@ def percent(numerator: int, denominator: int) -> float | None:
     return round(numerator / denominator * 100, 2)
 
 
+def load_env_file(file_path: str | Path = ".env") -> None:
+    path = Path(file_path)
+    if not path.exists():
+        return
+
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value.strip().strip("\"'")
+
+
 def summarize_daily_data(
     target_date: date,
     orders: list[dict[str, Any]],
@@ -148,6 +164,7 @@ class DouyinClient:
         client_secret: str | None = None,
         account_id: str | None = None,
     ):
+        load_env_file()
         if requests is None:
             raise RuntimeError("缺少 Python 依赖 requests，请先安装 requirements.txt")
 
