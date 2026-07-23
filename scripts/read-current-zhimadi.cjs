@@ -60,6 +60,10 @@ function formatPercent(value) {
   return `${Number(value).toFixed(2)}%`;
 }
 
+function formatCents(value) {
+  return `¥${formatMoney(Number(value || 0) / 100)}`;
+}
+
 function storeKey(store) {
   const value = String(store || "")
     .replace(/\s+/g, "")
@@ -121,7 +125,7 @@ function buildStoreProfitRows(purchaseRows, salesRows) {
   return rows.sort((a, b) => b.profit - a.profit);
 }
 
-function buildMarkdown(dateText, report, lemeng = null) {
+function buildMarkdown(dateText, report, lemeng = null, douyin = null) {
   const lines = [
     `### 水果店月报 ${dateText}`,
     "",
@@ -139,6 +143,24 @@ function buildMarkdown(dateText, report, lemeng = null) {
     lines.push(
       `本月总毛利（销售-进货）：${formatMoney(grossProfit)}`,
       `本月总毛利率：${formatPercent(grossMargin)}`,
+    );
+  }
+
+  if (douyin) {
+    const rate = douyin.verification.verification_rate_percent;
+    lines.push(
+      "",
+      `#### 抖音昨日经营 ${douyin.report_date}`,
+      `下单 ${douyin.orders.submitted_order_count} 单 | 成交 ${douyin.orders.paid_order_count} 单`,
+      `成交券 ${douyin.orders.paid_coupon_count} 张 | 销售额 ${formatCents(douyin.orders.sales_amount_cents)}`,
+      `核销 ${douyin.verification.verified_count} 张 | 核销金额 ${formatCents(douyin.verification.verified_amount_cents)}`,
+      `核销率（核销券/成交券）：${rate === null ? "-" : formatPercent(rate)}`,
+      `预计分账收入：${formatCents(douyin.settlement.estimated_income_cents)}`,
+      "",
+      "#### 抖音直播来源",
+      `成交 ${douyin.live.paid_order_count} 单 / ${douyin.live.paid_coupon_count} 张 | 销售额 ${formatCents(douyin.live.sales_amount_cents)}`,
+      `核销 ${douyin.live.verified_count} 张 | 核销金额 ${formatCents(douyin.live.verified_amount_cents)}`,
+      `预计分账收入：${formatCents(douyin.live.estimated_income_cents)}`,
     );
   }
 

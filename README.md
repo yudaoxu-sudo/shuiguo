@@ -84,3 +84,87 @@ pnpm listen
 芝麻地登录过期时，登录检查或月报请求会直接触发验证码图；回复 `验证码ABCD` 即可恢复服务器登录态。
 
 可选装 ddddocr 后，监听脚本会先本地识别芝麻地的简单图形验证码；识别成功会自动提交，失败再发验证码图到钉钉让人回复。
+
+## 抖音来客官方 API
+
+抖音模块只调用开放平台官方接口，默认读取北京时间昨天的数据。原有芝麻地、乐檬、钉钉和定时任务保持不变。
+
+### 权限开通
+
+开放平台路径：
+
+```text
+控制台 > 生活服务商家应用 > 马哥的数据 > 解决方案
+> 到综团购解决方案 > 按能力开通
+```
+
+当前应用已开通：
+
+- `订单查询`：读取昨日下单和成交数据。
+- `团购核销`：应用具备团购券核销能力。
+- `团购核销对账`：读取核销历史和预计分账账单。
+- `团购退款`：为订单退款状态补充能力，本日报暂不主动退款。
+
+来客商家绑定路径：
+
+```text
+抖音来客 > 合作与授权 > 自研 SaaS 绑定
+```
+
+服务器 IP 在应用详情的 `开发配置 > IP 白名单` 中添加。生产服务器当前只需配置其公网 IPv4。
+
+### 日报使用的接口
+
+1. 获取调用凭证
+   - `POST https://open.douyin.com/oauth/client_token/`
+   - 必传：`client_key`、`client_secret`、`grant_type=client_credential`
+   - 使用：`data.access_token`、`data.expires_in`
+2. 订单查询
+   - `GET https://open.douyin.com/goodlife/v1/trade/order/query/`
+   - 权限：`life.capacity.order.query`
+   - 必传：`account_id`、`page_num`、`page_size`
+   - 日报另传：`cursor`、`create_order_start_time`、`create_order_end_time`
+   - 使用：`orders[].order_status`、`count`、`pay_amount`、`order_sale_info.sale_channel`
+3. 验券历史
+   - `GET https://open.douyin.com/goodlife/v1/fulfilment/certificate/verify_record/query/`
+   - 权限：`life.capacity.billing`
+   - 必传：`account_id`、`cursor`、`size`
+   - 日报另传：`start_time`、`end_time`
+   - 使用：`records_v2[].status`、`verify_time`、`amount.coupon_pay_amount`
+4. 账单查询
+   - `GET https://open.douyin.com/goodlife/v1/settle/ledger/query/`
+   - 权限：`life.capacity.billing`
+   - 必传：`account_id`、`bill_date`、`cursor`、`size`
+   - 使用：`ledger_records[].amount.goods`、`amount.coupon_pay`、`order_attrribute.source`
+
+### 数据口径
+
+- 下单量：昨日创建的全部订单，包含取消订单。
+- 成交订单/成交券：订单状态为已支付、待使用、已完成或部分支付。
+- 销售额：成交订单的 `pay_amount`，单位由分转换为元。
+- 核销量：昨日有效核销记录，撤销核销记录不计。
+- 核销金额：有效核销记录的 `coupon_pay_amount`。
+- 核销率：昨日核销券数 / 昨日成交券数。两者不是同一批券，结果可能超过 100%。
+- 预计分账收入：账单 `amount.goods` 汇总。官方说明分账单约在核销一小时后生成，这个金额不代表已经提现到账。
+- 直播来源：订单 `sale_channel=直播`，账单 `source=livebroadcasting`。
+
+当前生活服务商家应用可读取直播来源成交和核销数据。直播观看人数、峰值在线、观看时长属于抖音小程序数据分析能力，当前应用类型没有对应的官方接口，因此日报不填造这些指标。
+
+### 配置与运行
+
+在服务器 `.env` 中填写：
+
+```bash
+DOUYIN_ENABLED=true
+DOUYIN_CLIENT_KEY=
+DOUYIN_CLIENT_SECRET=
+DOUYIN_ACCOUNT_ID=
+```
+
+独立测试：
+
+```bash
+.venv/bin/python scripts/douyin_client.py --pretty
+```
+
+模块会缓存两小时有效的 `access_token`，提前五分钟刷新；网络错误、平台繁忙、限流和 token 失效会自动重试。订单接口单应用默认最大 20 QPS，代码使用串行分页，不会主动压满限流。建议在次日读取完整昨日数据，账单至少给核销后留出一小时生成时间。

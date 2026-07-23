@@ -4,6 +4,7 @@ const path = require("path");
 const { chromium } = require("playwright");
 const { parseZhimadiText, buildMarkdown } = require("./read-current-zhimadi.cjs");
 const { parseLemengMonthlyText } = require("./read-current-lemeng.cjs");
+const { readDouyin } = require("./read-current-douyin.cjs");
 const { withLock } = require("./runtime-lock.cjs");
 const { gotoZhimadi } = require("./zhimadi-navigation.cjs");
 
@@ -449,10 +450,19 @@ async function runReportOnce(outputDir) {
       const attempts = Number(process.env.REPORT_STEP_ATTEMPTS || 3);
       const zhimadi = await retryStep("芝麻地报表", () => withFreshPage(context, "zhimadi", readZhimadi), attempts);
       const lemeng = await retryStep("乐檬报表", () => withFreshPage(context, "lemeng", readLemeng), attempts);
+      const douyin = process.env.DOUYIN_ENABLED === "true"
+        ? await retryStep("抖音报表", () => readDouyin(), attempts)
+        : null;
       const dateText = todayText();
       fs.writeFileSync(path.join(outputDir, `zhimadi-monthly-${dateText}.json`), JSON.stringify(zhimadi, null, 2));
       fs.writeFileSync(path.join(outputDir, `lemeng-monthly-${dateText}.json`), JSON.stringify(lemeng, null, 2));
-      const markdown = buildMarkdown(dateText, zhimadi, lemeng);
+      if (douyin) {
+        fs.writeFileSync(
+          path.join(outputDir, `douyin-daily-${douyin.report_date}.json`),
+          JSON.stringify(douyin, null, 2),
+        );
+      }
+      const markdown = buildMarkdown(dateText, zhimadi, lemeng, douyin);
       fs.writeFileSync(path.join(outputDir, `monthly-report-${dateText}.md`), markdown);
       await sendDingTalk(markdown);
     } finally {

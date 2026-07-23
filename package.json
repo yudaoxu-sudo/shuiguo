@@ -13,6 +13,7 @@
     "notify": "node scripts/send-dingtalk.cjs",
     "report": "node scripts/daily-report.cjs",
     "report:scheduled": "node scripts/run-scheduled-report.cjs",
+    "douyin:yesterday": ".venv/bin/python scripts/douyin_client.py --pretty",
     "zhimadi:current": "node scripts/read-current-zhimadi.cjs",
     "lemeng:current": "node scripts/read-current-lemeng.cjs"
   },
