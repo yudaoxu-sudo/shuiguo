@@ -34,7 +34,13 @@ async function waitForLogin(page) {
   const existingLogin = await firstVisible(
     page.getByText("立即登录", { exact: true }),
   );
-  if (existingLogin) await existingLogin.click();
+  if (existingLogin) {
+    await existingLogin.click();
+    await page.getByText("密码登录", { exact: true }).waitFor({
+      state: "visible",
+      timeout: 10000,
+    });
+  }
 
   const configuredPassword = process.env.DOUYIN_PASSWORD || "";
   const terminal = readline.createInterface({
@@ -51,6 +57,10 @@ async function waitForLogin(page) {
         page.getByText("密码登录", { exact: true }),
       );
       if (passwordLogin) await passwordLogin.click();
+      await page.locator('input[placeholder="密码"]:visible').waitFor({
+        state: "visible",
+        timeout: 10000,
+      });
 
       const phoneInput = await firstVisible(page.getByPlaceholder("手机号码"));
       const passwordInput = await firstVisible(page.getByPlaceholder("密码"));
