@@ -316,14 +316,23 @@ async function readLemeng(page) {
       `乐檬营业收款报表日期周期控件匹配数 ${await periodSelector.count()}`,
     );
   }
-  await periodSelector.click();
-  const monthOption = page.locator(
-    ".earth-select-item-option:visible",
-  ).filter({ hasText: /^本月$/ });
-  if ((await monthOption.count()) === 0) {
+  let monthOption;
+  for (let attempt = 0; attempt < 3 && !monthOption; attempt += 1) {
+    await periodSelector.click();
+    await page.waitForTimeout(500);
+    const candidates = page.getByText("本月", { exact: true });
+    for (let index = 0; index < await candidates.count(); index += 1) {
+      const candidate = candidates.nth(index);
+      if (await candidate.isVisible()) {
+        monthOption = candidate;
+        break;
+      }
+    }
+  }
+  if (!monthOption) {
     throw new Error("乐檬营业收款报表没有找到“本月”选项");
   }
-  await monthOption.last().click();
+  await monthOption.click();
 
   const queryButton = page.locator("button:visible").filter({
     hasText: /^查\s*询$/,
@@ -493,6 +502,15 @@ async function runReportOnce(outputDir) {
           path.join(outputDir, `douyin-monthly-${dateText}.json`),
           JSON.stringify(douyin, null, 2),
         );
+        if (douyin.monthly?.complete !== true) {
+          const completed = Number(douyin.monthly?.cached_day_count || 0);
+          const missing = douyin.monthly?.missing_dates || [];
+          throw new Error(
+            `抖音本月综合账单不完整：已获取 ${completed}/${
+              completed + missing.length
+            } 天，缺少 ${missing.join("、")}`,
+          );
+        }
       }
       const markdown = buildMarkdown(dateText, zhimadi, lemeng, douyin);
       fs.writeFileSync(path.join(outputDir, `monthly-report-${dateText}.md`), markdown);
