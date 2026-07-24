@@ -76,6 +76,25 @@ test("matches Douyin POI aliases to Lemeng stores", () => {
   assert.deepEqual(result.unmatchedDouyinStores, []);
 });
 
+test("sorts store financial rows by profit from highest to lowest", () => {
+  const result = buildStoreFinancialRows(
+    [
+      { store: "有花头古城街店", sales: 9000 },
+      { store: "有花头白溪店", sales: 3000 },
+    ],
+    [
+      { store: "有花头古城街店", sales: 10000 },
+      { store: "有花头白溪店", sales: 8000 },
+    ],
+  );
+
+  assert.equal(result.rows[0].store, "有花头白溪店");
+  assert.equal(result.rows[0].rank, 1);
+  assert.equal(result.rows[0].profit, 4976);
+  assert.equal(result.rows[1].store, "有花头古城街店");
+  assert.equal(result.rows[1].profit, 970);
+});
+
 test("builds monthly Douyin totals from the finance summary without ledger pagination", () => {
   const result = buildDouyinBrowserSummary({
     reportDate: "2026-07-24",
@@ -326,6 +345,7 @@ test("renders one metric per mobile line with the unified monthly formula", () =
   );
 
   assert.match(markdown, /#### 抖音本月经营 2026-07/);
+  assert.match(markdown, /#### 门店营业与毛利（按本月毛利金额排名）/);
   assert.match(markdown, /线上营业额（抖音平台费已扣）：2,000\.00/);
   assert.match(markdown, /本月总营业额（线上\+线下）：12,000\.00/);
   assert.match(markdown, /本月扣费后营业额：11,970\.00/);

@@ -195,7 +195,7 @@ function buildStoreFinancialRows(purchaseRows, salesRows, douyinStores = []) {
         purchaseByKey.get(key)?.purchase || 0,
       ),
     };
-  }).sort((a, b) => b.businessRevenue - a.businessRevenue);
+  }).sort((a, b) => b.profit - a.profit);
 
   const revenueTotal = rows.reduce((sum, row) => sum + row.businessRevenue, 0);
   rows.forEach((row, index) => {
@@ -411,7 +411,7 @@ function buildMarkdown(dateText, report, lemeng = null, douyin = null) {
     lemeng.ranking,
     monthly.stores || [],
   );
-  lines.push("", "#### 门店营业与毛利（按本月营业额排名）");
+  lines.push("", "#### 门店营业与毛利（按本月毛利金额排名）");
   for (const row of storeFinancials.rows) {
     lines.push(
       "",
