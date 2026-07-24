@@ -107,7 +107,6 @@ pnpm douyin:login
 
 ```bash
 DOUYIN_ENABLED=true
-DOUYIN_SOURCE=browser
 DOUYIN_FINANCE_URL=https://life.douyin.com/p/finance/v2/home
 DOUYIN_PHONE=
 DOUYIN_PASSWORD=
@@ -125,14 +124,4 @@ pnpm douyin:monthly
 - `所有门店商家应得 + 未归属金额 = 本月商家应得`
 - 抖音金额均使用页面的扣点后金额，不再重复扣 2.5%
 
-抖音登录失效或页面临时异常时，月报仍会推送芝麻地和乐檬数据，并在抖音区域标明失败原因。抖音恢复后，综合营业额和毛利自动恢复计算。
-
-### 逐笔账单 API
-
-开放平台综合账单接口保留为财务抽查工具：
-
-```bash
-pnpm douyin:api
-```
-
-该接口每页最多 50 条，适合核对单笔账单和追查差异。它不再参与日常月报主流程，避免大量分页请求和开放平台限流。
+抖音登录失效或页面临时异常时，正式月报会停止并发送失败提醒，避免推送缺少线上营业额和毛利的残缺报表。日报只读取财务页面的本月聚合数据，不请求逐笔订单或账单明细。
