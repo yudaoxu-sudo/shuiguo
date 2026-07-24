@@ -70,21 +70,30 @@ class SummarizeDailyDataTest(unittest.TestCase):
         result = summarize_daily_data(date(2026, 7, 23), [], [], [])
         self.assertIsNone(result["verification"]["verification_rate_percent"])
 
-    def test_summarizes_ledger_by_store_and_deduplicates_certificates(self):
+    def test_summarizes_ledger_by_store_and_deduplicates_records(self):
         result = summarize_ledger_day(
             date(2026, 7, 23),
             [
                 {
+                    "ledger_id": "ledger-1",
                     "certificate": {"certificate_id": "coupon-1"},
                     "poi_id": "poi-a",
-                    "amount": {"coupon_pay": 1000, "goods": 975},
+                    "amount": {"coupon_pay": 1000, "goods": 600},
                 },
                 {
+                    "ledger_id": "ledger-2",
                     "certificate": {"certificate_id": "coupon-1"},
                     "poi_id": "poi-a",
-                    "amount": {"coupon_pay": 1000, "goods": 975},
+                    "amount": {"coupon_pay": 1000, "goods": 375},
                 },
                 {
+                    "ledger_id": "ledger-2",
+                    "certificate": {"certificate_id": "coupon-1"},
+                    "poi_id": "poi-a",
+                    "amount": {"coupon_pay": 1000, "goods": 375},
+                },
+                {
+                    "ledger_id": "ledger-3",
                     "certificate": {"certificate_id": "coupon-2"},
                     "poi_id": "poi-b",
                     "amount": {"coupon_pay": 500, "goods": 488},

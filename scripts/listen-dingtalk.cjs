@@ -130,7 +130,7 @@ async function sendSessionText(client, sessionWebhook, senderStaffId, content) {
   if (!sessionWebhook) return;
 
   const accessToken = await client.getAccessToken();
-  await fetch(sessionWebhook, {
+  const response = await fetch(sessionWebhook, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -145,6 +145,20 @@ async function sendSessionText(client, sessionWebhook, senderStaffId, content) {
       },
     }),
   });
+  const result = await response.text();
+  if (!response.ok) {
+    throw new Error(`钉钉会话回复失败: ${response.status} ${result}`);
+  }
+  if (result) {
+    try {
+      const parsed = JSON.parse(result);
+      if (Number(parsed.errcode || 0) !== 0) {
+        throw new Error(`钉钉会话回复失败: ${result}`);
+      }
+    } catch (error) {
+      if (error.message.startsWith("钉钉会话回复失败:")) throw error;
+    }
+  }
 }
 
 function runMonthlyReport() {

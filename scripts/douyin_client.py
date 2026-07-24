@@ -169,23 +169,36 @@ def summarize_ledger_day(
             "estimated_income_cents": 0,
         }
     )
-    seen_certificates: set[str] = set()
+    seen_ledgers: set[str] = set()
+    certificate_amounts: dict[tuple[str, str], int] = {}
 
     for record in ledger_records:
+        ledger_key = str(record.get("ledger_id") or record.get("id") or "")
+        if not ledger_key:
+            ledger_key = json.dumps(record, ensure_ascii=False, sort_keys=True)
+        if ledger_key in seen_ledgers:
+            continue
+        seen_ledgers.add(ledger_key)
+
         certificate_id = str(
             (record.get("certificate") or {}).get("certificate_id") or ""
         )
-        dedupe_key = certificate_id or str(record.get("ledger_id") or record.get("id") or "")
-        if not dedupe_key or dedupe_key in seen_certificates:
-            continue
-        seen_certificates.add(dedupe_key)
-
         poi_id = str(record.get("poi_id") or "").strip()
         amount = record.get("amount") or {}
         store = stores[poi_id]
-        store["verified_count"] += 1
-        store["verified_amount_cents"] += as_int(amount.get("coupon_pay"))
         store["estimated_income_cents"] += as_int(amount.get("goods"))
+
+        certificate_key = certificate_id or ledger_key
+        grouping_key = (poi_id, certificate_key)
+        certificate_amounts[grouping_key] = max(
+            certificate_amounts.get(grouping_key, 0),
+            as_int(amount.get("coupon_pay")),
+        )
+
+    for (poi_id, _), coupon_amount in certificate_amounts.items():
+        store = stores[poi_id]
+        store["verified_count"] += 1
+        store["verified_amount_cents"] += coupon_amount
 
     store_rows = [
         {"poi_id": poi_id, **values}
