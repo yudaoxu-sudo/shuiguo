@@ -44,6 +44,19 @@ async function readSafeResponseDetails(response) {
   }
 }
 
+async function waitForSmsCodeFile(filePath) {
+  const deadline = Date.now() + Number(process.env.DOUYIN_SMS_WAIT_MS || 5 * 60 * 1000);
+  while (Date.now() < deadline) {
+    if (fs.existsSync(filePath)) {
+      const code = fs.readFileSync(filePath, "utf8").trim();
+      fs.rmSync(filePath, { force: true });
+      return code;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error("等待抖音短信验证码超时");
+}
+
 async function firstVisible(locator) {
   const count = await locator.count();
   for (let index = 0; index < count; index += 1) {
@@ -159,7 +172,10 @@ async function waitForLogin(page) {
     await sendCode.click();
     console.log("DOUYIN_SMS_SENT");
 
-    const code = (await terminal.question("短信验证码：")).trim();
+    const codeFile = process.env.DOUYIN_SMS_CODE_FILE;
+    const code = codeFile
+      ? await waitForSmsCodeFile(path.resolve(codeFile))
+      : (await terminal.question("短信验证码：")).trim();
     if (!/^\d{4,8}$/.test(code)) throw new Error("短信验证码格式不正确");
     await codeInput.fill(code);
 
