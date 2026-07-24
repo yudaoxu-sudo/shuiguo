@@ -7,16 +7,18 @@
 - 芝麻地：销售 > 销售报表 > 销售汇总表(按客户)
 - 芝麻地日期：本月 1 日到当天
 - 芝麻地进货额：销售金额
-- 芝麻地仓库成本：销售成本
-- 乐檬：报表 > 数据指标
-- 乐檬月销售累计：本月累计销售里的营业额(券售价)
-- 乐檬月销售排名：月销售额排名里的门店Top
-- 抖音本月到店核销券额：本月核销账单 `coupon_pay` 按券去重汇总
-- 到店销售（不含抖音券）：乐檬含券销售额 - 抖音本月到店核销券额
-- 抖音券手续费：抖音本月到店核销券额 × 2.5%
-- 到店销售手续费：到店销售（不含抖音券）× 0.3%
-- 扣手续费后销售额：乐檬含券销售额 - 抖音券手续费 - 到店销售手续费
-- 手续费后毛利：扣手续费后销售额 - 芝麻地本月门店进货额
+- 乐檬：报表 > 营业分析 > 营业收款报表 > 门店汇总
+- 乐檬日期：本月
+- 线下营业额：乐檬 `营业额(不含券)`
+- 抖音本月到账：综合账单正向金额减退款金额，按门店汇总
+- 抖音实际到账：账单营业日加 5 个自然日后已结算的金额
+- 抖音预计到账：尚未到结算日的金额
+- 抖音实际到账和预计到账均已扣平台扣点，不再扣 2.5%
+- 线上营业额：抖音实际到账 + 抖音预计到账
+- 本月总营业额：线下营业额 + 线上营业额
+- 线下手续费：线下营业额 × 0.3%
+- 本月扣费后营业额：本月总营业额 - 线下手续费
+- 本月毛利：本月扣费后营业额 - 芝麻地本月门店进货额
 - 钉钉推送格式：手机窄版列表，避免 Markdown 表格横向滚动。
 - 推送时间：每天 22:00 后
 - 推送渠道：钉钉机器人
@@ -90,7 +92,7 @@ pnpm listen
 
 ## 抖音来客官方 API
 
-抖音模块只调用开放平台官方接口，默认读取北京时间昨天的数据。原有芝麻地、乐檬、钉钉和定时任务保持不变。
+抖音模块只调用开放平台官方接口，读取北京时间本月 1 日到当天的综合账单。钉钉手动 `@水果店月报 666` 和晚间定时任务共用同一份月报代码。
 
 ### 权限开通
 
@@ -101,13 +103,7 @@ pnpm listen
 > 到综团购解决方案 > 按能力开通
 ```
 
-当前应用已开通：
-
-- `订单查询`：读取昨日下单和成交数据。
-- `团购核销`：应用具备团购券核销能力。
-- `团购核销对账`：读取核销历史和预计分账账单。
-- `团购退款`：为订单退款状态补充能力，本日报暂不主动退款。
-- `门店管理`：读取抖音 POI ID 和门店名称，用于逐店匹配乐檬销售。
+月报使用 `团购核销对账`、`账单明细` 和 `门店管理` 权限。门店管理用于把账单 `poi_id` 映射到乐檬门店。
 
 来客商家绑定路径：
 
@@ -123,24 +119,12 @@ pnpm listen
    - `POST https://open.douyin.com/oauth/client_token/`
    - 必传：`client_key`、`client_secret`、`grant_type=client_credential`
    - 使用：`data.access_token`、`data.expires_in`
-2. 订单查询
-   - `GET https://open.douyin.com/goodlife/v1/trade/order/query/`
-   - 权限：`life.capacity.order.query`
-   - 必传：`account_id`、`page_num`、`page_size`
-   - 日报另传：`cursor`、`create_order_start_time`、`create_order_end_time`
-   - 使用：`orders[].order_status`、`count`、`pay_amount`、`order_sale_info.sale_channel`
-3. 验券历史
-   - `GET https://open.douyin.com/goodlife/v1/fulfilment/certificate/verify_record/query/`
-   - 权限：`life.capacity.billing`
-   - 必传：`account_id`、`cursor`、`size`
-   - 日报另传：`start_time`、`end_time`
-   - 使用：`records_v2[].status`、`verify_time`、`amount.coupon_pay_amount`
-4. 账单查询
-   - `GET https://open.douyin.com/goodlife/v1/settle/ledger/query/`
-   - 权限：`life.capacity.billing`
-   - 必传：`account_id`、`bill_date`、`cursor`、`size`
-   - 使用：`ledger_records[].amount.goods`、`amount.coupon_pay`、`order_attrribute.source`
-5. 门店信息查询
+2. 综合账单查询
+   - `GET https://open.douyin.com/goodlife/v1/settle/bill/composite_query/`
+   - 权限：`life.capacity.billing.detail`
+   - 必传：`account_id`、`root_account_id`、`bill_date`、`cursor`、`size`、`biz_type=1`
+   - 使用：`ledger_records[].fund_amount`、`fund_amount_type`、`poi_id`、`ledger_id`
+3. 门店信息查询
    - `GET https://open.douyin.com/goodlife/v1/shop/poi/query/`
    - 权限：`life.capacity.shop`
    - 必传：`account_id`、`page`、`size`
@@ -148,19 +132,13 @@ pnpm listen
 
 ### 数据口径
 
-- 下单量：昨日创建的全部订单，包含取消订单。
-- 成交订单/成交券：订单状态为已支付、待使用、已完成或部分支付。
-- 销售额：成交订单的 `pay_amount`，单位由分转换为元。
-- 核销量：昨日有效核销记录，撤销核销记录不计。
-- 核销金额：有效核销记录的 `coupon_pay_amount`。
-- 核销率：昨日核销券数 / 昨日成交券数。两者不是同一批券，结果可能超过 100%。
-- 预计分账收入：账单 `amount.goods` 汇总。官方说明分账单约在核销一小时后生成，这个金额不代表已经提现到账。
-- 直播来源：订单 `sale_channel=直播`，账单 `source=livebroadcasting`。
-- 门店拆分：账单 `poi_id` 与门店信息接口返回的 `poi_id` 关联，再按门店别名匹配乐檬门店名称。
-- 本月核销账单按天缓存到 `output/douyin-ledger-daily`。今天的数据缓存 10 分钟，昨天会在次日重新拉取一次以补齐延迟账单，更早日期直接使用缓存。
-- 开放平台尚未完成自助化接入时有 400 次/天的调用配额。首次整月回补会保留已完成日期并在后续运行中续传；月度数据未完整前，日报继续展示原有毛利，且不会用部分月份金额计算手续费。
-
-当前生活服务商家应用可读取直播来源成交和核销数据。直播观看人数、峰值在线、观看时长属于抖音小程序数据分析能力，当前应用类型没有对应的官方接口，因此日报不填造这些指标。
+- `fund_amount_type=0` 计正向收入，`fund_amount_type=1` 计退款负数。
+- 每条账单按 `ledger_id` 去重，金额单位由分转换为元。
+- `实际到账 + 商家预计到账` 等于抖音本月到账合计。
+- 两项抖音金额均直接使用平台扣点后的金额，不再计算 2.5% 手续费。
+- 账单 `poi_id` 关联门店信息，再用门店别名匹配乐檬和芝麻地。
+- 每日综合账单缓存到 `output/douyin-settlement-daily`。当天缓存 10 分钟，昨天在次日刷新，更早日期复用稳定缓存。
+- 月度日期缺失时标记数据不完整，不使用部分金额计算综合营业额和毛利。
 
 ### 配置与运行
 
@@ -173,10 +151,10 @@ DOUYIN_CLIENT_SECRET=
 DOUYIN_ACCOUNT_ID=
 ```
 
-独立测试：
+独立测试本月数据：
 
 ```bash
 .venv/bin/python scripts/douyin_client.py --pretty
 ```
 
-模块会缓存两小时有效的 `access_token`，提前五分钟刷新；网络错误、平台繁忙、限流和 token 失效会自动重试。订单接口单应用默认最大 20 QPS，代码使用串行分页，不会主动压满限流。建议在次日读取完整昨日数据，账单至少给核销后留出一小时生成时间。
+模块会缓存两小时有效的 `access_token`，提前五分钟刷新；网络错误、平台繁忙、限流和 token 失效会自动重试。综合账单按日期串行分页并持续缓存，减少重复调用和限流风险。

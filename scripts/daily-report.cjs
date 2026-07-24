@@ -3,7 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
 const { parseZhimadiText, buildMarkdown } = require("./read-current-zhimadi.cjs");
-const { parseLemengMonthlyText } = require("./read-current-lemeng.cjs");
+const { buildLemengCollectionReport } = require("./read-current-lemeng.cjs");
 const { readDouyin } = require("./read-current-douyin.cjs");
 const { withLock } = require("./runtime-lock.cjs");
 const { gotoZhimadi } = require("./zhimadi-navigation.cjs");
@@ -294,79 +294,108 @@ async function waitForZhimadiSummary(frame) {
 }
 
 async function readLemeng(page) {
-  await gotoWithRetry(page, "https://sharec.lemengcloud.com/report/home/data-index", { waitUntil: "domcontentloaded", timeout: 60000 });
+  await gotoWithRetry(
+    page,
+    "https://sharec.lemengcloud.com/report/business/business-collection-report",
+    { waitUntil: "domcontentloaded", timeout: 60000 },
+  );
 
   if (await isLoginPage(page)) {
     throw new Error("乐檬登录态失效，需要先运行 setup-login 并手动完成验证码登录");
   }
 
-  await waitForLemengDashboard(page);
-  let monthly;
-  const deadline = Date.now() + 60000;
-  while (!monthly) {
-    const text = await page.locator("body").innerText({ timeout: 15000 });
-    try {
-      monthly = parseLemengMonthlyText(text);
-    } catch (error) {
-      if (Date.now() > deadline) throw error;
-      await page.waitForTimeout(1000);
-    }
-  }
-
-  const ranking = await page.evaluate(() => {
-    const parseAmount = (value) => Number(String(value).replace(/,/g, ""));
-    const storeGrid = [...document.querySelectorAll(".ag-theme-lemon")].find((grid) => grid.innerText.includes("门店Top"));
-    if (!storeGrid) return [];
-
-    return [...storeGrid.querySelectorAll(".ag-row")]
-      .map((row) => {
-        const cells = [...row.querySelectorAll(".ag-cell")];
-        const get = (colId) => cells.find((cell) => cell.getAttribute("col-id") === colId)?.innerText.trim();
-        const store = get("name");
-        const sales = get("saleMoney");
-        const rate = get("rate");
-        return { store, sales, rate };
-      })
-      .filter((row) => row.store && row.sales && row.rate)
-      .map((row, index) => ({
-        rank: index + 1,
-        store: row.store,
-        sales: parseAmount(row.sales),
-        rate: row.rate,
-      }));
+  await page.waitForSelector('input[placeholder="开始日期"]:visible', {
+    timeout: 60000,
   });
 
-  if (ranking.length === 0) {
-    throw new Error("没有读取到乐檬月销售排名");
+  const monthSelector = page.locator(
+    '.earth-select-selection-item[title="本月"]:visible',
+  );
+  if ((await monthSelector.count()) === 1) {
+    await monthSelector.click();
+    const monthOption = page.locator(
+      ".earth-select-item-option:visible",
+    ).filter({ hasText: /^本月$/ });
+    if ((await monthOption.count()) === 0) {
+      throw new Error("乐檬营业收款报表没有找到“本月”选项");
+    }
+    await monthOption.last().click();
   }
 
-  return { monthly, ranking };
-}
+  const queryButton = page.locator("button:visible").filter({
+    hasText: /^查询$/,
+  });
+  if ((await queryButton.count()) !== 1) {
+    throw new Error(`乐檬营业收款报表查询按钮匹配数 ${await queryButton.count()}`);
+  }
+  await queryButton.click();
 
-async function waitForLemengDashboard(page) {
-  const startedAt = Date.now();
-  const deadline = startedAt + 60000;
-  let refreshed = false;
-  let lastText = "";
+  await page.waitForFunction(() => {
+    const isVisible = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return rect.width > 0
+        && rect.height > 0
+        && style.visibility !== "hidden"
+        && style.display !== "none";
+    };
+    return [...document.querySelectorAll(".ag-root-wrapper")]
+      .filter(isVisible)
+      .some((root) => (
+        root.querySelector('[col-id="branchName"]')
+        && root.querySelector('[col-id="paymentReceiptMoney"]')
+        && root.querySelector('.ag-row-pinned [col-id="paymentReceiptMoney"]')
+        && root.querySelectorAll(
+          '.ag-center-cols-container .ag-row:not(.ag-row-pinned) [col-id="branchName"]',
+        ).length > 0
+      ));
+  }, { timeout: 60000 });
 
-  while (Date.now() < deadline) {
-    lastText = await page.locator("body").innerText({ timeout: 15000 }).catch(() => "");
-    if (lastText.includes("本月累计销售") && lastText.includes("月销售额排名")) {
-      return;
-    }
+  const extracted = await page.evaluate(() => {
+    const isVisible = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return rect.width > 0
+        && rect.height > 0
+        && style.visibility !== "hidden"
+        && style.display !== "none";
+    };
+    const root = [...document.querySelectorAll(".ag-root-wrapper")]
+      .filter(isVisible)
+      .find((candidate) => (
+        candidate.querySelector('[col-id="branchName"]')
+        && candidate.querySelector('[col-id="paymentReceiptMoney"]')
+        && candidate.querySelector('.ag-row-pinned [col-id="paymentReceiptMoney"]')
+      ));
+    if (!root) return null;
 
-    if (!refreshed && Date.now() - startedAt > 20000) {
-      const refreshButton = page.getByText("全局刷新", { exact: true });
-      if ((await refreshButton.count()) > 0) {
-        await refreshButton.first().click().catch(() => {});
-      }
-      refreshed = true;
-    }
+    const rows = [...root.querySelectorAll(
+      ".ag-center-cols-container .ag-row:not(.ag-row-pinned)",
+    )]
+      .map((row) => ({
+        store: row.querySelector('[col-id="branchName"]')?.innerText.trim(),
+        sales: row.querySelector('[col-id="paymentReceiptMoney"]')?.innerText.trim(),
+      }))
+      .filter((row) => row.store && row.sales);
+    const total = root
+      .querySelector('.ag-row-pinned [col-id="paymentReceiptMoney"]')
+      ?.innerText.trim();
+    return { rows, total };
+  });
 
-    await page.waitForTimeout(1000);
+  if (!extracted) {
+    throw new Error("没有读取到乐檬营业收款报表");
+  }
+  const report = buildLemengCollectionReport(extracted.rows, extracted.total);
+  const expectedMonth = monthStartText().slice(0, 7);
+  const selectedStart = await page
+    .locator('input[placeholder="开始日期"]:visible')
+    .inputValue();
+  if (!selectedStart.startsWith(expectedMonth)) {
+    throw new Error(`乐檬营业收款报表日期不是本月：${selectedStart}`);
   }
 
-  throw new Error(`乐檬数据指标加载超时：${lastText.slice(0, 200).replace(/\s+/g, " ")}`);
+  return report;
 }
 
 async function isLoginPage(page) {
@@ -458,7 +487,7 @@ async function runReportOnce(outputDir) {
       fs.writeFileSync(path.join(outputDir, `lemeng-monthly-${dateText}.json`), JSON.stringify(lemeng, null, 2));
       if (douyin) {
         fs.writeFileSync(
-          path.join(outputDir, `douyin-daily-${douyin.report_date}.json`),
+          path.join(outputDir, `douyin-monthly-${dateText}.json`),
           JSON.stringify(douyin, null, 2),
         );
       }

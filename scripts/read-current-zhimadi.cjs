@@ -35,18 +35,19 @@ function parseZhimadiText(text) {
   }
 
   const totalValues = parts.slice(totalIndex + 1, totalIndex + 9);
-  const totals = {
-    quantity: Number(totalValues[0]),
-    weight: Number(totalValues[1]),
-    orders: Number(totalValues[2]),
-    discount: Number(totalValues[3]),
-    sales: Number(totalValues[4]),
-    cost: Number(totalValues[5]),
-    profit: Number(totalValues[6]),
-    grossMargin: totalValues[7],
+  return {
+    rows,
+    totals: {
+      quantity: Number(totalValues[0]),
+      weight: Number(totalValues[1]),
+      orders: Number(totalValues[2]),
+      discount: Number(totalValues[3]),
+      sales: Number(totalValues[4]),
+      cost: Number(totalValues[5]),
+      profit: Number(totalValues[6]),
+      grossMargin: totalValues[7],
+    },
   };
-
-  return { rows, totals };
 }
 
 function formatMoney(value) {
@@ -58,10 +59,6 @@ function formatMoney(value) {
 
 function formatPercent(value) {
   return `${Number(value).toFixed(2)}%`;
-}
-
-function formatCents(value) {
-  return `¥${formatMoney(Number(value || 0) / 100)}`;
 }
 
 function roundMoney(value) {
@@ -83,31 +80,38 @@ function assertMoneyTotal(label, total, rows, field) {
   }
 }
 
-function calculateSalesFees(salesWithCoupon, couponAmount, options = {}) {
-  const douyinFeeRate = Number(options.douyinFeeRate ?? process.env.DOUYIN_FEE_RATE ?? 0.025);
-  const lemengFeeRate = Number(options.lemengFeeRate ?? process.env.LEMENG_FEE_RATE ?? 0.003);
-  const sales = Number(salesWithCoupon || 0);
-  const coupon = Number(couponAmount || 0);
-  if (coupon < 0 || coupon > sales + 0.01) {
-    throw new Error(
-      `抖音券额 ${formatMoney(coupon)} 超出含券销售额 ${formatMoney(sales)}`,
-    );
-  }
-  const nonCouponSales = roundMoney(sales - coupon);
-  const douyinFee = roundMoney(coupon * douyinFeeRate);
-  const lemengFee = roundMoney(nonCouponSales * lemengFeeRate);
-  const netSales = roundMoney(sales - douyinFee - lemengFee);
+function calculateOperatingTotals(
+  lemengSalesWithoutCoupon,
+  douyinActualReceived,
+  douyinExpectedReceived,
+  purchaseAmount,
+  options = {},
+) {
+  const lemengFeeRate = Number(
+    options.lemengFeeRate ?? process.env.LEMENG_FEE_RATE ?? 0.003,
+  );
+  const lemengSales = roundMoney(lemengSalesWithoutCoupon || 0);
+  const douyinActual = roundMoney(douyinActualReceived || 0);
+  const douyinExpected = roundMoney(douyinExpectedReceived || 0);
+  const purchase = roundMoney(purchaseAmount || 0);
+  const douyinTotal = roundMoney(douyinActual + douyinExpected);
+  const businessRevenue = roundMoney(lemengSales + douyinTotal);
+  const lemengFee = roundMoney(lemengSales * lemengFeeRate);
+  const netRevenue = roundMoney(businessRevenue - lemengFee);
+  const profit = roundMoney(netRevenue - purchase);
 
   return {
-    salesWithCoupon: sales,
-    couponAmount: coupon,
-    nonCouponSales,
-    douyinFee,
+    lemengSalesWithoutCoupon: lemengSales,
+    douyinActualReceived: douyinActual,
+    douyinExpectedReceived: douyinExpected,
+    douyinTotal,
+    businessRevenue,
     lemengFee,
-    totalFee: roundMoney(douyinFee + lemengFee),
-    netSales,
-    douyinFeeRate,
     lemengFeeRate,
+    netRevenue,
+    purchase,
+    profit,
+    grossMargin: netRevenue === 0 ? 0 : profit / netRevenue * 100,
   };
 }
 
@@ -135,46 +139,6 @@ function looksLikeStore(store) {
   return /店|花都|湾|城|苑|路/.test(String(store || ""));
 }
 
-function buildStoreProfitRows(purchaseRows, salesRows) {
-  const purchaseByKey = new Map();
-  for (const row of purchaseRows) {
-    const key = storeKey(row.store);
-    const current = purchaseByKey.get(key) || { store: row.store, purchase: 0 };
-    current.purchase += row.sales;
-    purchaseByKey.set(key, current);
-  }
-
-  const usedPurchaseKeys = new Set();
-  const rows = [];
-
-  for (const row of salesRows) {
-    const key = storeKey(row.store);
-    const purchase = purchaseByKey.get(key);
-    const purchaseAmount = purchase?.purchase || 0;
-    usedPurchaseKeys.add(key);
-    rows.push({
-      store: row.store,
-      sales: row.sales,
-      purchase: purchaseAmount,
-      profit: row.sales - purchaseAmount,
-      grossMargin: row.sales === 0 ? 0 : ((row.sales - purchaseAmount) / row.sales) * 100,
-    });
-  }
-
-  for (const [key, row] of purchaseByKey) {
-    if (usedPurchaseKeys.has(key) || !looksLikeStore(row.store)) continue;
-    rows.push({
-      store: row.store,
-      sales: 0,
-      purchase: row.purchase,
-      profit: -row.purchase,
-      grossMargin: 0,
-    });
-  }
-
-  return rows.sort((a, b) => b.profit - a.profit);
-}
-
 function buildStoreFinancialRows(purchaseRows, salesRows, douyinStores = []) {
   const purchaseByKey = new Map();
   for (const row of purchaseRows) {
@@ -183,47 +147,59 @@ function buildStoreFinancialRows(purchaseRows, salesRows, douyinStores = []) {
       store: row.store,
       purchase: 0,
     };
-    current.purchase += Number(row.sales || 0);
+    current.purchase = roundMoney(current.purchase + Number(row.sales || 0));
     purchaseByKey.set(key, current);
   }
 
-  const couponByKey = new Map();
+  const douyinByKey = new Map();
   for (const row of douyinStores) {
     const key = storeKey(row.store);
-    const current = couponByKey.get(key) || 0;
-    couponByKey.set(
-      key,
-      current + Number(row.verified_amount_cents || 0) / 100,
-    );
+    const current = douyinByKey.get(key) || {
+      store: row.store,
+      actual: 0,
+      expected: 0,
+    };
+    current.actual += Number(row.actual_received_cents || 0) / 100;
+    current.expected += Number(row.expected_received_cents || 0) / 100;
+    douyinByKey.set(key, current);
   }
 
-  const usedCouponKeys = new Set();
+  const usedDouyinKeys = new Set();
   const rows = salesRows.map((row) => {
     const key = storeKey(row.store);
-    usedCouponKeys.add(key);
-    const fees = calculateSalesFees(row.sales, couponByKey.get(key) || 0);
-    const purchase = purchaseByKey.get(key)?.purchase || 0;
-    const profit = roundMoney(fees.netSales - purchase);
+    const douyin = douyinByKey.get(key);
+    usedDouyinKeys.add(key);
     return {
-      ...fees,
       store: row.store,
-      rank: row.rank,
-      rate: row.rate,
-      purchase,
-      profit,
-      grossMargin: fees.netSales === 0 ? 0 : (profit / fees.netSales) * 100,
+      ...calculateOperatingTotals(
+        row.sales,
+        douyin?.actual || 0,
+        douyin?.expected || 0,
+        purchaseByKey.get(key)?.purchase || 0,
+      ),
     };
+  }).sort((a, b) => b.businessRevenue - a.businessRevenue);
+
+  const revenueTotal = rows.reduce((sum, row) => sum + row.businessRevenue, 0);
+  rows.forEach((row, index) => {
+    row.rank = index + 1;
+    row.rate = revenueTotal === 0
+      ? "0.00%"
+      : `${(row.businessRevenue / revenueTotal * 100).toFixed(2)}%`;
   });
 
-  const unmatchedDouyinStores = douyinStores
-    .filter((row) => {
-      const key = storeKey(row.store);
-      return !usedCouponKeys.has(key) && Number(row.verified_amount_cents || 0) !== 0;
-    })
-    .map((row) => ({
+  const unmatchedDouyinStores = [...douyinByKey.entries()]
+    .filter(([key, row]) => (
+      !usedDouyinKeys.has(key)
+      && Math.abs(row.actual + row.expected) > 0.001
+    ))
+    .map(([, row]) => ({
       store: row.store,
-      couponAmount: Number(row.verified_amount_cents || 0) / 100,
-    }));
+      actual: roundMoney(row.actual),
+      expected: roundMoney(row.expected),
+      total: roundMoney(row.actual + row.expected),
+    }))
+    .sort((a, b) => b.total - a.total);
 
   const salesKeys = new Set(salesRows.map((row) => storeKey(row.store)));
   const unmatchedPurchaseRows = [...purchaseByKey.entries()]
@@ -234,214 +210,187 @@ function buildStoreFinancialRows(purchaseRows, salesRows, douyinStores = []) {
   return { rows, unmatchedDouyinStores, unmatchedPurchaseRows };
 }
 
+function assertDouyinMonthlyTotals(monthly) {
+  const stores = monthly.stores || [];
+  const actual = stores.reduce(
+    (sum, row) => sum + Number(row.actual_received_cents || 0),
+    0,
+  );
+  const expected = stores.reduce(
+    (sum, row) => sum + Number(row.expected_received_cents || 0),
+    0,
+  );
+  const settlement = monthly.settlement || {};
+  if (actual !== Number(settlement.actual_received_cents || 0)) {
+    throw new Error("抖音本月实际到账总额与门店明细不一致");
+  }
+  if (expected !== Number(settlement.expected_received_cents || 0)) {
+    throw new Error("抖音本月预计到账总额与门店明细不一致");
+  }
+  if (
+    actual + expected
+    !== Number(settlement.merchant_due_cents || 0)
+  ) {
+    throw new Error("抖音本月到账合计与实际、预计到账不一致");
+  }
+}
+
 function buildMarkdown(dateText, report, lemeng = null, douyin = null) {
   assertMoneyTotal("芝麻地进货", report.totals.sales, report.rows, "sales");
   if (lemeng) {
     assertMoneyTotal(
-      "乐檬销售",
-      lemeng.monthly.salesWithCoupon,
+      "乐檬不含券营业额",
+      lemeng.monthly.salesWithoutCoupon,
       lemeng.ranking,
       "sales",
     );
   }
-  if (douyin?.monthly?.complete) {
-    const storeCouponTotal = (douyin.monthly.stores || []).reduce(
-      (sum, row) => sum + Number(row.verified_amount_cents || 0),
-      0,
-    );
-    const monthlyCouponTotal = Number(
-      douyin.monthly.verification.verified_amount_cents || 0,
-    );
-    if (Math.abs(storeCouponTotal - monthlyCouponTotal) > 1) {
-      throw new Error(
-        `抖音本月券额汇总不一致：总额 ${formatCents(monthlyCouponTotal)}，逐店合计 ${formatCents(storeCouponTotal)}`,
-      );
-    }
-  }
+
+  const monthly = douyin?.monthly;
+  const douyinComplete = monthly?.complete === true;
+  if (douyinComplete) assertDouyinMonthlyTotals(monthly);
 
   const lines = [
     `### 水果店月报 ${dateText}`,
     "",
-    "#### 总览",
-    hardBreak(`乐檬含券销售额：${lemeng ? formatMoney(lemeng.monthly.salesWithCoupon) : "-"}`),
-    hardBreak(`芝麻地进货额：${formatMoney(report.totals.sales)}`),
+    "#### 本月总览",
+    hardBreak(
+      `线下营业额（乐檬不含券）：${
+        lemeng ? formatMoney(lemeng.monthly.salesWithoutCoupon) : "-"
+      }`,
+    ),
   ];
 
-  if (lemeng) {
-    const lemengSales = lemeng.monthly.salesWithCoupon;
-    const purchaseAmount = report.totals.sales;
-    const grossProfit = roundMoney(lemengSales - purchaseAmount);
-    const monthlyDouyinComplete = douyin?.monthly?.complete !== false;
-
-    if (douyin?.monthly && monthlyDouyinComplete) {
-      const couponAmount = Number(douyin.monthly.verification.verified_amount_cents || 0) / 100;
-      const fees = calculateSalesFees(lemengSales, couponAmount);
-      const netGrossProfit = roundMoney(fees.netSales - purchaseAmount);
-      const netGrossMargin = fees.netSales === 0 ? 0 : (netGrossProfit / fees.netSales) * 100;
-
-      lines.push(
-        hardBreak(`抖音本月到店核销券额：${formatMoney(couponAmount)}`),
-        hardBreak(`到店销售（不含抖音券）：${formatMoney(fees.nonCouponSales)}`),
-        hardBreak(`抖音券手续费（2.5%）：${formatMoney(fees.douyinFee)}`),
-        hardBreak(`到店销售手续费（0.3%）：${formatMoney(fees.lemengFee)}`),
-        hardBreak(`扣手续费后销售额：${formatMoney(fees.netSales)}`),
-        hardBreak(`账面毛利（含券销售-进货）：${formatMoney(grossProfit)}`),
-        hardBreak(`手续费后毛利：${formatMoney(netGrossProfit)}`),
-        hardBreak(`手续费后毛利率：${formatPercent(netGrossMargin)}`),
-      );
-    } else {
-      const grossMargin = lemengSales === 0 ? 0 : (grossProfit / lemengSales) * 100;
-      lines.push(
-        hardBreak(`本月总毛利（销售-进货）：${formatMoney(grossProfit)}`),
-        hardBreak(`本月总毛利率：${formatPercent(grossMargin)}`),
-      );
-      if (douyin?.monthly) {
-        const completed = douyin.monthly.cached_day_count;
-        const total = completed + douyin.monthly.missing_dates.length;
-        lines.push(hardBreak(`抖音本月数据正在分批拉取：已完成 ${completed}/${total} 天；完整前暂不计算本月手续费`));
-      }
-    }
-  }
-
-  if (douyin) {
-    const rate = douyin.verification.verification_rate_percent;
-    const douyinFeeRate = Number(process.env.DOUYIN_FEE_RATE ?? 0.025);
-    const netCouponAmount = Math.round(
-      Number(douyin.verification.verified_amount_cents || 0) * (1 - douyinFeeRate),
-    );
-    const liveNetCouponAmount = Math.round(
-      Number(douyin.live.verified_amount_cents || 0) * (1 - douyinFeeRate),
+  if (lemeng && douyinComplete) {
+    const settlement = monthly.settlement;
+    const totals = calculateOperatingTotals(
+      lemeng.monthly.salesWithoutCoupon,
+      Number(settlement.actual_received_cents || 0) / 100,
+      Number(settlement.expected_received_cents || 0) / 100,
+      report.totals.sales,
     );
     lines.push(
-      "",
-      `#### 抖音昨日经营 ${douyin.report_date}`,
-      hardBreak(`下单：${douyin.orders.submitted_order_count} 单`),
-      hardBreak(`成交：${douyin.orders.paid_order_count} 单 / ${douyin.orders.paid_coupon_count} 张券`),
-      hardBreak(`成交额：${formatCents(douyin.orders.sales_amount_cents)}`),
-      hardBreak(`核销：${douyin.verification.verified_count} 张`),
-      hardBreak(`核销券额：${formatCents(douyin.verification.verified_amount_cents)}`),
-      hardBreak(`券扣费后（按 ${formatPercent(douyinFeeRate * 100)}）：${formatCents(netCouponAmount)}`),
-      hardBreak(`核销率（核销券/成交券）：${rate === null ? "-" : formatPercent(rate)}`),
-      "",
-      "#### 抖音直播来源",
-      hardBreak(`成交：${douyin.live.paid_order_count} 单 / ${douyin.live.paid_coupon_count} 张券`),
-      hardBreak(`成交额：${formatCents(douyin.live.sales_amount_cents)}`),
+      hardBreak(`线上已到账（抖音已结算）：${formatMoney(totals.douyinActualReceived)}`),
+      hardBreak(`线上预计到账（抖音待结算）：${formatMoney(totals.douyinExpectedReceived)}`),
+      hardBreak(`线上营业额（抖音平台费已扣）：${formatMoney(totals.douyinTotal)}`),
+      hardBreak(`本月总营业额（线上+线下）：${formatMoney(totals.businessRevenue)}`),
+      hardBreak(
+        `线下手续费（乐檬 ${formatPercent(totals.lemengFeeRate * 100)}）：${
+          formatMoney(totals.lemengFee)
+        }`,
+      ),
+      hardBreak(`本月扣费后营业额：${formatMoney(totals.netRevenue)}`),
+      hardBreak(`芝麻地进货额：${formatMoney(totals.purchase)}`),
+      hardBreak(`本月毛利：${formatMoney(totals.profit)}`),
+      hardBreak(`本月毛利率：${formatPercent(totals.grossMargin)}`),
     );
-    if (douyin.live.ledger_deduplicated === true) {
+  } else {
+    lines.push(hardBreak(`芝麻地进货额：${formatMoney(report.totals.sales)}`));
+    if (monthly) {
+      const completed = Number(monthly.cached_day_count || 0);
+      const total = completed + (monthly.missing_dates || []).length;
       lines.push(
-        hardBreak(`核销：${douyin.live.verified_count} 张`),
-        hardBreak(`核销券额：${formatCents(douyin.live.verified_amount_cents)}`),
-        hardBreak(`券扣费后（按 ${formatPercent(douyinFeeRate * 100)}）：${formatCents(liveNetCouponAmount)}`),
+        hardBreak(`抖音本月数据不完整：已获取 ${completed}/${total} 天`),
+        hardBreak("综合营业额和毛利暂不计算"),
       );
     } else {
-      lines.push(hardBreak("直播核销：本次旧缓存未按券去重，暂不展示"));
-    }
-
-    if (douyin.monthly) {
-      if (douyin.monthly.complete) {
-        const monthlyNetCouponAmount = Math.round(
-          Number(douyin.monthly.verification.verified_amount_cents || 0)
-            * (1 - douyinFeeRate),
-        );
-        lines.push(
-          "",
-          `#### 抖音本月核销 ${douyin.monthly.report_month}`,
-          hardBreak(`核销：${douyin.monthly.verification.verified_count} 张`),
-          hardBreak(`核销券额：${formatCents(douyin.monthly.verification.verified_amount_cents)}`),
-          hardBreak(`券扣费后（按 ${formatPercent(douyinFeeRate * 100)}）：${formatCents(monthlyNetCouponAmount)}`),
-        );
-      } else {
-        const completed = douyin.monthly.cached_day_count;
-        const total = completed + douyin.monthly.missing_dates.length;
-        lines.push(
-          "",
-          `#### 抖音本月核销 ${douyin.monthly.report_month}`,
-          hardBreak(`数据拉取进度：${completed}/${total} 天；完整前不展示本月券额`),
-        );
-      }
+      lines.push(hardBreak("抖音数据未启用，综合营业额和毛利暂不计算"));
     }
   }
 
-  lines.push(
-    "",
-    "#### 芝麻地门店进货额",
-  );
+  if (monthly) {
+    lines.push("", `#### 抖音本月经营 ${monthly.report_month}`);
+    if (douyinComplete) {
+      const settlement = monthly.settlement;
+      lines.push(
+        hardBreak(
+          `实际到账（已结算）：${
+            formatMoney(Number(settlement.actual_received_cents || 0) / 100)
+          }`,
+        ),
+        hardBreak(
+          `商家预计到账（待结算）：${
+            formatMoney(Number(settlement.expected_received_cents || 0) / 100)
+          }`,
+        ),
+        hardBreak(
+          `到账合计：${
+            formatMoney(Number(settlement.merchant_due_cents || 0) / 100)
+          }`,
+        ),
+        "抖音金额均为平台已扣点金额，不再重复扣费。",
+      );
+    } else {
+      const completed = Number(monthly.cached_day_count || 0);
+      const total = completed + (monthly.missing_dates || []).length;
+      lines.push(`数据完整度：${completed}/${total} 天，完整前不参与经营计算。`);
+    }
+  }
 
+  lines.push("", "#### 芝麻地门店进货额");
   const sortedPurchaseRows = [...report.rows].sort((a, b) => b.sales - a.sales);
   const purchaseRows = sortedPurchaseRows.filter((row) => looksLikeStore(row.store));
-  const unmatchedPurchaseRows = sortedPurchaseRows.filter((row) => !looksLikeStore(row.store));
+  const otherPurchaseRows = sortedPurchaseRows.filter((row) => !looksLikeStore(row.store));
   for (const [index, row] of purchaseRows.entries()) {
     lines.push("", `**${index + 1}. ${row.store}**：${formatMoney(row.sales)}`);
   }
 
-  if (unmatchedPurchaseRows.length > 0) {
+  if (otherPurchaseRows.length > 0) {
     lines.push("", "#### 其他进货（未匹配门店）");
-    for (const row of unmatchedPurchaseRows) {
+    for (const row of otherPurchaseRows) {
       lines.push("", `**${row.store}**：${formatMoney(row.sales)}`);
     }
   }
 
-  if (lemeng) {
-    const monthlyDouyinComplete = douyin?.monthly?.complete !== false;
-    if (!douyin?.monthly || !monthlyDouyinComplete) {
-      lines.push(
-        "",
-        "#### 乐檬门店销售排名",
-      );
-      for (const row of lemeng.ranking) {
-        lines.push(
-          "",
-          hardBreak(`**${row.rank}. ${row.store}**`),
-          hardBreak(`销售：${formatMoney(row.sales)}`),
-          `销售占比：${row.rate}`,
-        );
-      }
+  if (!lemeng) return lines.join("\n");
 
-      const profitRows = buildStoreProfitRows(report.rows, lemeng.ranking);
-      lines.push("", "#### 门店毛利排名");
-      for (const [index, row] of profitRows.entries()) {
-        lines.push(
-          "",
-          hardBreak(`**${index + 1}. ${row.store}**`),
-          hardBreak(`销售：${formatMoney(row.sales)}`),
-          hardBreak(`进货：${formatMoney(row.purchase)}`),
-          hardBreak(`毛利：${formatMoney(row.profit)}`),
-          `毛利率：${formatPercent(row.grossMargin)}`,
-        );
-      }
-      return lines.join("\n");
-    }
-
-    const storeFinancials = buildStoreFinancialRows(
-      report.rows,
-      lemeng.ranking,
-      douyin?.monthly?.stores || [],
-    );
-    lines.push(
-      "",
-      "#### 门店销售与毛利（按含券销售排名）",
-    );
-
-    for (const row of storeFinancials.rows) {
+  if (!douyinComplete) {
+    lines.push("", "#### 乐檬门店营业额（不含券）");
+    for (const row of lemeng.ranking) {
       lines.push(
         "",
         hardBreak(`**${row.rank}. ${row.store}**`),
-        hardBreak(`含券销售：${formatMoney(row.salesWithCoupon)}`),
-        hardBreak(`抖音券：${formatMoney(row.couponAmount)}`),
-        hardBreak(`不含券销售：${formatMoney(row.nonCouponSales)}`),
-        hardBreak(`扣费后销售：${formatMoney(row.netSales)}`),
-        hardBreak(`进货：${formatMoney(row.purchase)}`),
-        hardBreak(`毛利：${formatMoney(row.profit)}`),
-        hardBreak(`毛利率：${formatPercent(row.grossMargin)}`),
-        `销售占比：${row.rate}`,
+        hardBreak(`营业额：${formatMoney(row.sales)}`),
+        `占比：${row.rate}`,
       );
     }
+    return lines.join("\n");
+  }
 
-    if (storeFinancials.unmatchedDouyinStores.length > 0) {
-      lines.push("", "#### 未匹配抖音门店");
-      for (const row of storeFinancials.unmatchedDouyinStores) {
-        lines.push(`${row.store} | 核销券额 ${formatMoney(row.couponAmount)}`);
-      }
+  const storeFinancials = buildStoreFinancialRows(
+    report.rows,
+    lemeng.ranking,
+    monthly.stores || [],
+  );
+  lines.push("", "#### 门店营业与毛利（按本月营业额排名）");
+  for (const row of storeFinancials.rows) {
+    lines.push(
+      "",
+      hardBreak(`**${row.rank}. ${row.store}**`),
+      hardBreak(`线下营业额：${formatMoney(row.lemengSalesWithoutCoupon)}`),
+      hardBreak(`线上已到账：${formatMoney(row.douyinActualReceived)}`),
+      hardBreak(`线上预计到账：${formatMoney(row.douyinExpectedReceived)}`),
+      hardBreak(`线上营业额：${formatMoney(row.douyinTotal)}`),
+      hardBreak(`门店总营业额：${formatMoney(row.businessRevenue)}`),
+      hardBreak(`线下手续费：${formatMoney(row.lemengFee)}`),
+      hardBreak(`扣费后营业额：${formatMoney(row.netRevenue)}`),
+      hardBreak(`进货：${formatMoney(row.purchase)}`),
+      hardBreak(`毛利：${formatMoney(row.profit)}`),
+      hardBreak(`毛利率：${formatPercent(row.grossMargin)}`),
+      `营业额占比：${row.rate}`,
+    );
+  }
+
+  if (storeFinancials.unmatchedDouyinStores.length > 0) {
+    lines.push("", "#### 未匹配抖音门店");
+    for (const row of storeFinancials.unmatchedDouyinStores) {
+      lines.push(
+        "",
+        hardBreak(`**${row.store}**`),
+        hardBreak(`实际到账：${formatMoney(row.actual)}`),
+        hardBreak(`预计到账：${formatMoney(row.expected)}`),
+        `合计：${formatMoney(row.total)}`,
+      );
     }
   }
 
@@ -476,7 +425,6 @@ module.exports = {
   parseZhimadiText,
   buildMarkdown,
   storeKey,
-  buildStoreProfitRows,
-  calculateSalesFees,
+  calculateOperatingTotals,
   buildStoreFinancialRows,
 };

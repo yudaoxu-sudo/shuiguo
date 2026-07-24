@@ -14,9 +14,9 @@ function pythonExecutable() {
   return "python3";
 }
 
-async function readDouyin(targetDate) {
+async function readDouyin(monthThrough) {
   const args = [path.resolve("scripts/douyin_client.py")];
-  if (targetDate) args.push("--date", targetDate);
+  if (monthThrough) args.push("--month-through", monthThrough);
 
   const { stdout } = await execFileAsync(pythonExecutable(), args, {
     cwd: path.resolve("."),

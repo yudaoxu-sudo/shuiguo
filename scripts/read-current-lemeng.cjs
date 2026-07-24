@@ -1,107 +1,79 @@
 const fs = require("fs");
-const path = require("path");
 
 function parseAmount(value) {
-  return Number(String(value).replace(/,/g, ""));
+  const amount = Number(String(value ?? "").replace(/[,\s]/g, ""));
+  if (!Number.isFinite(amount)) {
+    throw new Error(`乐檬金额无效: ${value}`);
+  }
+  return amount;
 }
 
-function parseLemengMonthlyText(text) {
-  const lines = text.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
-  const monthIndex = lines.indexOf("本月累计销售");
-  const rankingIndex = lines.indexOf("月销售额排名");
+function roundMoney(value) {
+  return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+}
 
-  if (monthIndex === -1) {
-    throw new Error("没有找到乐檬本月累计销售");
+function buildLemengCollectionReport(rawRows, rawTotal) {
+  const grouped = new Map();
+  for (const rawRow of rawRows || []) {
+    const store = String(rawRow.store || "").trim();
+    if (!store) continue;
+    grouped.set(
+      store,
+      roundMoney((grouped.get(store) || 0) + parseAmount(rawRow.sales)),
+    );
   }
 
-  const endIndex = rankingIndex === -1 ? lines.length : rankingIndex;
-  const section = lines.slice(monthIndex, endIndex);
-  const metric = (label) => {
-    const index = section.indexOf(label);
-    if (index === -1) throw new Error(`没有找到乐檬指标: ${label}`);
-    return {
-      value: parseAmount(section[index + 1]),
-      compareLabel: section[index + 2],
-      compareAmount: parseAmount(section[index + 3] || "0"),
-      compareRate: section[index + 5] || section[index + 4],
-    };
-  };
+  const rows = [...grouped.entries()].map(([store, sales]) => ({ store, sales }));
+  if (rows.length === 0) {
+    throw new Error("没有读取到乐檬营业收款报表门店数据");
+  }
 
-  const sales = metric("营业额(券售价)");
-  const grossProfit = metric("毛利额");
-  const grossMargin = metric("毛利率");
+  const total = roundMoney(parseAmount(rawTotal));
+  const detailTotal = roundMoney(rows.reduce((sum, row) => sum + row.sales, 0));
+  if (Math.abs(total - detailTotal) > 0.01) {
+    throw new Error(
+      `乐檬营业额汇总不一致：总额 ${total.toFixed(2)}，门店合计 ${detailTotal.toFixed(2)}`,
+    );
+  }
+
+  const ranking = rows
+    .sort((a, b) => b.sales - a.sales)
+    .map((row, index) => ({
+      rank: index + 1,
+      store: row.store,
+      sales: row.sales,
+      rate: total === 0 ? "0.00%" : `${(row.sales / total * 100).toFixed(2)}%`,
+    }));
 
   return {
-    salesWithCoupon: sales.value,
-    salesCompareAmount: sales.compareAmount,
-    salesCompareRate: sales.compareRate,
-    grossProfit: grossProfit.value,
-    grossProfitCompareAmount: grossProfit.compareAmount,
-    grossProfitCompareRate: grossProfit.compareRate,
-    grossMargin: grossMargin.value,
-    grossMarginCompareAmount: grossMargin.compareAmount,
-    grossMarginCompareRate: grossMargin.compareRate,
+    monthly: {
+      salesWithoutCoupon: total,
+    },
+    ranking,
   };
 }
 
-function parseRankingGridText(text) {
-  const parts = text.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
-  const headerIndex = parts.indexOf("门店Top");
-  const amountHeaderIndex = parts.indexOf("销售额", headerIndex);
-  const rateHeaderIndex = parts.indexOf("占比", amountHeaderIndex);
-
-  if (headerIndex === -1 || amountHeaderIndex === -1 || rateHeaderIndex === -1) {
-    throw new Error("没有找到乐檬月销售排名表头");
-  }
-
-  const data = parts.slice(rateHeaderIndex + 1);
-  const firstStoreIndex = data.findIndex((part) => !/^\d+$/.test(part));
-  if (firstStoreIndex === -1) return [];
-
-  const stores = data.slice(firstStoreIndex);
-  const rows = [];
-  for (let index = 0; index < stores.length; index += 3) {
-    const chunk = stores.slice(index, index + 3);
-    if (chunk.length !== 3) break;
-    rows.push({
-      rank: rows.length + 1,
-      store: chunk[0],
-      sales: parseAmount(chunk[1]),
-      rate: chunk[2],
-    });
-  }
-
-  return rows;
-}
-
-function parseLemengText(text) {
-  return {
-    monthly: parseLemengMonthlyText(text),
-    ranking: parseRankingGridText(text),
-  };
-}
-
-async function main() {
+function main() {
   const inputPath = process.argv[2];
   if (!inputPath) {
-    throw new Error("用法: node scripts/read-current-lemeng.cjs output/lemeng-page-text.txt");
+    throw new Error("用法: node scripts/read-current-lemeng.cjs <营业收款报表JSON>");
   }
 
-  const text = fs.readFileSync(inputPath, "utf8");
-  const report = parseLemengMonthlyText(text);
-  const outputDir = path.resolve("output");
-  fs.mkdirSync(outputDir, { recursive: true });
-
-  const today = new Date().toISOString().slice(0, 10);
-  fs.writeFileSync(path.join(outputDir, `lemeng-${today}.json`), JSON.stringify(report, null, 2));
+  const input = JSON.parse(fs.readFileSync(inputPath, "utf8"));
+  const report = buildLemengCollectionReport(input.rows, input.total);
   console.log(JSON.stringify(report, null, 2));
 }
 
 if (require.main === module) {
-  main().catch((error) => {
+  try {
+    main();
+  } catch (error) {
     console.error(error.message);
     process.exit(1);
-  });
+  }
 }
 
-module.exports = { parseLemengMonthlyText, parseRankingGridText, parseLemengText };
+module.exports = {
+  parseAmount,
+  buildLemengCollectionReport,
+};
