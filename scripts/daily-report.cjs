@@ -102,8 +102,33 @@ function writeJson(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
 }
 
+function incompleteDouyinResult(error) {
+  const reportDate = todayText();
+  return {
+    report_month: reportDate.slice(0, 7),
+    through_date: reportDate,
+    generated_at: new Date().toISOString(),
+    monthly: {
+      report_month: reportDate.slice(0, 7),
+      through_date: reportDate,
+      generated_at: new Date().toISOString(),
+      complete: false,
+      source: process.env.DOUYIN_SOURCE || "browser",
+      source_error: String(error?.message || error).slice(0, 500),
+      cached_day_count: 0,
+      missing_dates: [],
+      settlement: null,
+      stores: [],
+    },
+  };
+}
+
 function isZhimadiLoginError(error) {
   return String(error?.message || error).includes("芝麻地登录态失效");
+}
+
+function isDouyinLoginError(error) {
+  return String(error?.message || error).includes("抖音来客登录态失效");
 }
 
 function isZhimadiPageLoadError(error) {
@@ -193,7 +218,7 @@ async function retryStep(name, action, attempts = 3) {
     } catch (error) {
       lastError = error;
       console.warn(`${name}第 ${attempt} 次失败：${error.message}`);
-      if (isZhimadiLoginError(error)) throw error;
+      if (isZhimadiLoginError(error) || isDouyinLoginError(error)) throw error;
       if (attempt < attempts) await delay(5000);
     }
   }
@@ -491,9 +516,19 @@ async function runReportOnce(outputDir) {
       const attempts = Number(process.env.REPORT_STEP_ATTEMPTS || 3);
       const zhimadi = await retryStep("芝麻地报表", () => withFreshPage(context, "zhimadi", readZhimadi), attempts);
       const lemeng = await retryStep("乐檬报表", () => withFreshPage(context, "lemeng", readLemeng), attempts);
-      const douyin = process.env.DOUYIN_ENABLED === "true"
-        ? await retryStep("抖音报表", () => readDouyin(), attempts)
-        : null;
+      let douyin = null;
+      if (process.env.DOUYIN_ENABLED === "true") {
+        try {
+          douyin = await retryStep(
+            "抖音报表",
+            () => readDouyin(undefined, context),
+            attempts,
+          );
+        } catch (error) {
+          console.warn(`抖音汇总暂不可用，继续生成芝麻地和乐檬月报：${error.message}`);
+          douyin = incompleteDouyinResult(error);
+        }
+      }
       const dateText = todayText();
       fs.writeFileSync(path.join(outputDir, `zhimadi-monthly-${dateText}.json`), JSON.stringify(zhimadi, null, 2));
       fs.writeFileSync(path.join(outputDir, `lemeng-monthly-${dateText}.json`), JSON.stringify(lemeng, null, 2));

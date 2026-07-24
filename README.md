@@ -10,9 +10,10 @@
 - 乐檬：报表 > 营业分析 > 营业收款报表 > 门店汇总
 - 乐檬日期：本月
 - 线下营业额：乐檬 `营业额(不含券)`
-- 抖音本月到账：综合账单正向金额减退款金额，按门店汇总
-- 抖音实际到账：账单营业日加 5 个自然日后已结算的金额
-- 抖音预计到账：尚未到结算日的金额
+- 抖音本月到账：抖音来客 > 资金 > 账单统计 > 本月 `商家应得`
+- 抖音实际到账：本月商家应得 - 按日期汇总中的待结算金额
+- 抖音预计到账：按日期汇总中的待结算金额
+- 抖音门店到账：账单统计 > 本月 > 按门店 `商家应得`
 - 抖音实际到账和预计到账均已扣平台扣点，不再扣 2.5%
 - 线上营业额：抖音实际到账 + 抖音预计到账
 - 本月总营业额：线下营业额 + 线上营业额
@@ -90,71 +91,47 @@ pnpm listen
 
 可选装 ddddocr 后，监听脚本会先本地识别芝麻地的简单图形验证码；识别成功会自动提交，失败再发验证码图到钉钉让人回复。
 
-## 抖音来客官方 API
+## 抖音来客月度汇总
 
-抖音模块只调用开放平台官方接口，读取北京时间本月 1 日到当天的综合账单。钉钉手动 `@水果店月报 666` 和晚间定时任务共用同一份月报代码。
+日报使用服务器浏览器读取抖音来客后台已经计算好的本月总额和门店汇总。钉钉手动 `@水果店月报 666` 和晚间定时任务共用同一份月报代码。
 
-### 权限开通
+服务器首次配置：
 
-开放平台路径：
-
-```text
-控制台 > 生活服务商家应用 > 马哥的数据 > 解决方案
-> 到综团购解决方案 > 按能力开通
+```bash
+pnpm douyin:login
 ```
 
-月报使用 `团购核销对账`、`账单明细` 和 `门店管理` 权限。门店管理用于把账单 `poi_id` 映射到乐檬门店。
+按提示输入抖音来客手机号和短信验证码。登录态保存在 `output/browser-profile`，后续日报直接复用。
 
-来客商家绑定路径：
-
-```text
-抖音来客 > 合作与授权 > 自研 SaaS 绑定
-```
-
-服务器 IP 在应用详情的 `开发配置 > IP 白名单` 中添加。生产服务器当前只需配置其公网 IPv4。
-
-### 日报使用的接口
-
-1. 获取调用凭证
-   - `POST https://open.douyin.com/oauth/client_token/`
-   - 必传：`client_key`、`client_secret`、`grant_type=client_credential`
-   - 使用：`data.access_token`、`data.expires_in`
-2. 综合账单查询
-   - `GET https://open.douyin.com/goodlife/v1/settle/bill/composite_query/`
-   - 权限：`life.capacity.billing.detail`
-   - 必传：`account_id`、`root_account_id`、`bill_date`、`cursor`、`size`、`biz_type=1`
-   - 使用：`ledger_records[].fund_amount`、`fund_amount_type`、`poi_id`、`ledger_id`
-3. 门店信息查询
-   - `GET https://open.douyin.com/goodlife/v1/shop/poi/query/`
-   - 权限：`life.capacity.shop`
-   - 必传：`account_id`、`page`、`size`
-   - 使用：`pois[].poi.poi_id`、`pois[].poi.poi_name`
-
-### 数据口径
-
-- `fund_amount_type=0` 计正向收入，`fund_amount_type=1` 计退款负数。
-- 每条账单按 `ledger_id` 去重，金额单位由分转换为元。
-- `实际到账 + 商家预计到账` 等于抖音本月到账合计。
-- 两项抖音金额均直接使用平台扣点后的金额，不再计算 2.5% 手续费。
-- 账单 `poi_id` 关联门店信息，再用门店别名匹配乐檬和芝麻地。
-- 每日综合账单缓存到 `output/douyin-settlement-daily`。当天缓存 10 分钟，昨天在次日刷新，更早日期复用稳定缓存。
-- 月度日期缺失时标记数据不完整，不使用部分金额计算综合营业额和毛利。
-
-### 配置与运行
-
-在服务器 `.env` 中填写：
+在服务器 `.env` 中配置：
 
 ```bash
 DOUYIN_ENABLED=true
-DOUYIN_CLIENT_KEY=
-DOUYIN_CLIENT_SECRET=
-DOUYIN_ACCOUNT_ID=
+DOUYIN_SOURCE=browser
+DOUYIN_FINANCE_URL=https://life.douyin.com/p/finance/v2/home
+DOUYIN_PHONE=
 ```
 
-独立测试本月数据：
+独立测试本月汇总：
 
 ```bash
-.venv/bin/python scripts/douyin_client.py --pretty
+pnpm douyin:monthly
 ```
 
-模块会缓存两小时有效的 `access_token`，提前五分钟刷新；网络错误、平台繁忙、限流和 token 失效会自动重试。综合账单按日期串行分页并持续缓存，减少重复调用和限流风险。
+页面读取会校验三组关系：
+
+- `实际到账 + 预计到账 = 本月商家应得`
+- `所有门店商家应得 + 未归属金额 = 本月商家应得`
+- 抖音金额均使用页面的扣点后金额，不再重复扣 2.5%
+
+抖音登录失效或页面临时异常时，月报仍会推送芝麻地和乐檬数据，并在抖音区域标明失败原因。抖音恢复后，综合营业额和毛利自动恢复计算。
+
+### 逐笔账单 API
+
+开放平台综合账单接口保留为财务抽查工具：
+
+```bash
+pnpm douyin:api
+```
+
+该接口每页最多 50 条，适合核对单笔账单和追查差异。它不再参与日常月报主流程，避免大量分页请求和开放平台限流。

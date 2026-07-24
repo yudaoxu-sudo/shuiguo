@@ -6,6 +6,7 @@
   "scripts": {
     "setup-login": "node scripts/setup-login.cjs",
     "zhimadi:login": "node scripts/zhimadi-login.cjs",
+    "douyin:login": "node scripts/douyin-login.cjs",
     "listen": "node scripts/listen-dingtalk.cjs",
     "healthcheck": "node scripts/check-listener-health.cjs",
     "login-healthcheck": "node scripts/check-login-health.cjs",
@@ -13,7 +14,8 @@
     "notify": "node scripts/send-dingtalk.cjs",
     "report": "node scripts/daily-report.cjs",
     "report:scheduled": "node scripts/run-scheduled-report.cjs",
-    "douyin:monthly": ".venv/bin/python scripts/douyin_client.py --pretty",
+    "douyin:monthly": "node scripts/read-current-douyin-browser.cjs",
+    "douyin:api": ".venv/bin/python scripts/douyin_client.py --pretty",
     "zhimadi:current": "node scripts/read-current-zhimadi.cjs",
     "lemeng:current": "node scripts/read-current-lemeng.cjs"
   },

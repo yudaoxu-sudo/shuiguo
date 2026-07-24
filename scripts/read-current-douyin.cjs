@@ -14,7 +14,7 @@ function pythonExecutable() {
   return "python3";
 }
 
-async function readDouyin(monthThrough) {
+async function readDouyinApi(monthThrough) {
   const args = [path.resolve("scripts/douyin_client.py")];
   if (monthThrough) args.push("--month-through", monthThrough);
 
@@ -32,4 +32,18 @@ async function readDouyin(monthThrough) {
   }
 }
 
-module.exports = { readDouyin };
+async function readDouyin(monthThrough, context) {
+  const source = String(process.env.DOUYIN_SOURCE || "browser").toLowerCase();
+  if (source === "api") return readDouyinApi(monthThrough);
+  if (source !== "browser") {
+    throw new Error(`不支持的抖音数据源：${source}`);
+  }
+  if (!context) {
+    throw new Error("抖音后台汇总读取需要浏览器上下文");
+  }
+
+  const { readDouyinBrowser } = require("./read-current-douyin-browser.cjs");
+  return readDouyinBrowser(context, monthThrough);
+}
+
+module.exports = { readDouyin, readDouyinApi };

@@ -10,6 +10,9 @@ const {
 const {
   buildLemengCollectionReport,
 } = require("../scripts/read-current-lemeng.cjs");
+const {
+  buildDouyinBrowserSummary,
+} = require("../scripts/read-current-douyin-browser.cjs");
 
 test("uses Douyin received amounts directly and charges only Lemeng 0.3%", () => {
   const result = calculateOperatingTotals(10000, 1500, 500, 7000, {
@@ -65,6 +68,39 @@ test("matches Douyin POI aliases to Lemeng stores", () => {
   assert.deepEqual(result.unmatchedDouyinStores, []);
 });
 
+test("builds monthly Douyin totals from the finance summary without ledger pagination", () => {
+  const result = buildDouyinBrowserSummary({
+    reportDate: "2026-07-24",
+    merchantDue: "219,891.94",
+    dateRows: [
+      { date: "2026-07-24", status: "待结算", merchantDue: "10,008.88" },
+      { date: "2026-07-23", status: "待结算", merchantDue: "7,541.35" },
+      { date: "2026-07-22", status: "待结算", merchantDue: "6,466.17" },
+      { date: "2026-07-21", status: "待结算", merchantDue: "5,207.02" },
+      { date: "2026-07-20", status: "待结算", merchantDue: "6,405.45" },
+      { date: "2026-07-19", status: "已结算", merchantDue: "9,000.00" },
+    ],
+    storeRows: [
+      { store: "有花头(华府锦苑店)", merchantDue: "20,104.82" },
+      { store: "有花头(白溪店)", merchantDue: "22,996.63" },
+      { store: "有花头(水木店)", merchantDue: "25,452.72" },
+      { store: "有花头(长中店)", merchantDue: "18,808.51" },
+      { store: "有花头(西门店)", merchantDue: "19,647.40" },
+      { store: "有花头(通宝城店)", merchantDue: "45,464.46" },
+      { store: "有花头(古城街店)", merchantDue: "41,386.18" },
+      { store: "有花头(天逸湾店)", merchantDue: "26,011.83" },
+    ],
+  });
+
+  assert.equal(result.monthly.settlement.expected_received_cents, 3562887);
+  assert.equal(result.monthly.settlement.actual_received_cents, 18426307);
+  assert.equal(result.monthly.settlement.merchant_due_cents, 21989194);
+  assert.deepEqual(result.monthly.stores.at(-1), {
+    store: "未归属门店",
+    merchant_due_cents: 1939,
+  });
+});
+
 test("withholds combined revenue and profit when the Douyin month is incomplete", () => {
   const markdown = buildMarkdown(
     "2026-07-24",
@@ -100,6 +136,39 @@ test("withholds combined revenue and profit when the Douyin month is incomplete"
   assert.doesNotMatch(markdown, /账单回补|昨日经营/);
 });
 
+test("keeps the monthly report usable when the Douyin summary page fails", () => {
+  const markdown = buildMarkdown(
+    "2026-07-24",
+    {
+      totals: { sales: 7000 },
+      rows: [{ store: "长中店", sales: 7000 }],
+    },
+    {
+      monthly: { salesWithoutCoupon: 10000 },
+      ranking: [{
+        rank: 1,
+        store: "有花头金陵北路店",
+        sales: 10000,
+        rate: "100.00%",
+      }],
+    },
+    {
+      monthly: {
+        report_month: "2026-07",
+        complete: false,
+        source_error: "抖音来客登录态失效",
+        cached_day_count: 0,
+        missing_dates: [],
+      },
+    },
+  );
+
+  assert.match(markdown, /抖音本月汇总暂不可用：抖音来客登录态失效/);
+  assert.match(markdown, /线上营业额和综合毛利暂不计算/);
+  assert.match(markdown, /乐檬门店营业额（不含券）/);
+  assert.doesNotMatch(markdown, /0\/0 天/);
+});
+
 test("renders one metric per mobile line with the unified monthly formula", () => {
   const markdown = buildMarkdown(
     "2026-07-24",
@@ -132,8 +201,6 @@ test("renders one metric per mobile line with the unified monthly formula", () =
         },
         stores: [{
           store: "有花头(古城街店)",
-          actual_received_cents: 150000,
-          expected_received_cents: 50000,
           merchant_due_cents: 200000,
         }],
       },
@@ -146,7 +213,7 @@ test("renders one metric per mobile line with the unified monthly formula", () =
   assert.match(markdown, /本月扣费后营业额：11,970\.00/);
   assert.match(
     markdown,
-    /\*\*1\. 有花头古城街店\*\*  \n线下营业额：10,000\.00  \n线上已到账：1,500\.00  \n线上预计到账：500\.00  \n线上营业额：2,000\.00  \n门店总营业额：12,000\.00/,
+    /\*\*1\. 有花头古城街店\*\*  \n线下营业额：10,000\.00  \n线上营业额：2,000\.00  \n门店总营业额：12,000\.00/,
   );
   assert.match(markdown, /#### 其他进货（未匹配门店）\n\n\*\*张献铖\*\*：115\.46/);
   assert.doesNotMatch(markdown, /2\.5%|抖音券手续费|昨日经营|账单回补/);
@@ -186,7 +253,7 @@ test("rejects Douyin totals that do not reconcile with store details", () => {
         },
       },
     ),
-    /实际到账总额与门店明细不一致/,
+    /到账总额与门店汇总不一致/,
   );
 });
 

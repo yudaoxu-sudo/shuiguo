@@ -158,9 +158,22 @@ function buildStoreFinancialRows(purchaseRows, salesRows, douyinStores = []) {
       store: row.store,
       actual: 0,
       expected: 0,
+      total: 0,
+      hasBreakdown: true,
     };
-    current.actual += Number(row.actual_received_cents || 0) / 100;
-    current.expected += Number(row.expected_received_cents || 0) / 100;
+    const hasBreakdown = (
+      Object.hasOwn(row, "actual_received_cents")
+      && Object.hasOwn(row, "expected_received_cents")
+    );
+    const actual = Number(row.actual_received_cents || 0) / 100;
+    const expected = Number(row.expected_received_cents || 0) / 100;
+    const total = Object.hasOwn(row, "merchant_due_cents")
+      ? Number(row.merchant_due_cents || 0) / 100
+      : actual + expected;
+    current.actual += actual;
+    current.expected += expected;
+    current.total += total;
+    current.hasBreakdown = current.hasBreakdown && hasBreakdown;
     douyinByKey.set(key, current);
   }
 
@@ -169,12 +182,16 @@ function buildStoreFinancialRows(purchaseRows, salesRows, douyinStores = []) {
     const key = storeKey(row.store);
     const douyin = douyinByKey.get(key);
     usedDouyinKeys.add(key);
+    const douyinActual = douyin?.hasBreakdown
+      ? douyin.actual
+      : douyin?.total || 0;
+    const douyinExpected = douyin?.hasBreakdown ? douyin.expected : 0;
     return {
       store: row.store,
       ...calculateOperatingTotals(
         row.sales,
-        douyin?.actual || 0,
-        douyin?.expected || 0,
+        douyinActual,
+        douyinExpected,
         purchaseByKey.get(key)?.purchase || 0,
       ),
     };
@@ -191,13 +208,13 @@ function buildStoreFinancialRows(purchaseRows, salesRows, douyinStores = []) {
   const unmatchedDouyinStores = [...douyinByKey.entries()]
     .filter(([key, row]) => (
       !usedDouyinKeys.has(key)
-      && Math.abs(row.actual + row.expected) > 0.001
+      && Math.abs(row.total) > 0.001
     ))
     .map(([, row]) => ({
       store: row.store,
       actual: roundMoney(row.actual),
       expected: roundMoney(row.expected),
-      total: roundMoney(row.actual + row.expected),
+      total: roundMoney(row.total),
     }))
     .sort((a, b) => b.total - a.total);
 
@@ -212,6 +229,34 @@ function buildStoreFinancialRows(purchaseRows, salesRows, douyinStores = []) {
 
 function assertDouyinMonthlyTotals(monthly) {
   const stores = monthly.stores || [];
+  const storeTotal = stores.reduce(
+    (sum, row) => sum + (
+      Object.hasOwn(row, "merchant_due_cents")
+        ? Number(row.merchant_due_cents || 0)
+        : Number(row.actual_received_cents || 0)
+          + Number(row.expected_received_cents || 0)
+    ),
+    0,
+  );
+  const settlement = monthly.settlement || {};
+  const merchantDue = Number(settlement.merchant_due_cents || 0);
+  if (storeTotal !== merchantDue) {
+    throw new Error("抖音本月到账总额与门店汇总不一致");
+  }
+  if (
+    Number(settlement.actual_received_cents || 0)
+      + Number(settlement.expected_received_cents || 0)
+    !== merchantDue
+  ) {
+    throw new Error("抖音本月到账合计与实际、预计到账不一致");
+  }
+
+  const storesHaveBreakdown = stores.every((row) => (
+    Object.hasOwn(row, "actual_received_cents")
+    && Object.hasOwn(row, "expected_received_cents")
+  ));
+  if (!storesHaveBreakdown) return;
+
   const actual = stores.reduce(
     (sum, row) => sum + Number(row.actual_received_cents || 0),
     0,
@@ -220,18 +265,11 @@ function assertDouyinMonthlyTotals(monthly) {
     (sum, row) => sum + Number(row.expected_received_cents || 0),
     0,
   );
-  const settlement = monthly.settlement || {};
   if (actual !== Number(settlement.actual_received_cents || 0)) {
     throw new Error("抖音本月实际到账总额与门店明细不一致");
   }
   if (expected !== Number(settlement.expected_received_cents || 0)) {
     throw new Error("抖音本月预计到账总额与门店明细不一致");
-  }
-  if (
-    actual + expected
-    !== Number(settlement.merchant_due_cents || 0)
-  ) {
-    throw new Error("抖音本月到账合计与实际、预计到账不一致");
   }
 }
 
@@ -287,12 +325,19 @@ function buildMarkdown(dateText, report, lemeng = null, douyin = null) {
   } else {
     lines.push(hardBreak(`芝麻地进货额：${formatMoney(report.totals.sales)}`));
     if (monthly) {
-      const completed = Number(monthly.cached_day_count || 0);
-      const total = completed + (monthly.missing_dates || []).length;
-      lines.push(
-        hardBreak(`抖音本月数据不完整：已获取 ${completed}/${total} 天`),
-        hardBreak("综合营业额和毛利暂不计算"),
-      );
+      if (monthly.source_error) {
+        lines.push(
+          hardBreak(`抖音本月汇总暂不可用：${monthly.source_error}`),
+          hardBreak("线上营业额和综合毛利暂不计算"),
+        );
+      } else {
+        const completed = Number(monthly.cached_day_count || 0);
+        const total = completed + (monthly.missing_dates || []).length;
+        lines.push(
+          hardBreak(`抖音本月数据不完整：已获取 ${completed}/${total} 天`),
+          hardBreak("综合营业额和毛利暂不计算"),
+        );
+      }
     } else {
       lines.push(hardBreak("抖音数据未启用，综合营业额和毛利暂不计算"));
     }
@@ -321,9 +366,13 @@ function buildMarkdown(dateText, report, lemeng = null, douyin = null) {
         "抖音金额均为平台已扣点金额，不再重复扣费。",
       );
     } else {
-      const completed = Number(monthly.cached_day_count || 0);
-      const total = completed + (monthly.missing_dates || []).length;
-      lines.push(`数据完整度：${completed}/${total} 天，完整前不参与经营计算。`);
+      if (monthly.source_error) {
+        lines.push(`读取失败：${monthly.source_error}`);
+      } else {
+        const completed = Number(monthly.cached_day_count || 0);
+        const total = completed + (monthly.missing_dates || []).length;
+        lines.push(`数据完整度：${completed}/${total} 天，完整前不参与经营计算。`);
+      }
     }
   }
 
@@ -368,8 +417,6 @@ function buildMarkdown(dateText, report, lemeng = null, douyin = null) {
       "",
       hardBreak(`**${row.rank}. ${row.store}**`),
       hardBreak(`线下营业额：${formatMoney(row.lemengSalesWithoutCoupon)}`),
-      hardBreak(`线上已到账：${formatMoney(row.douyinActualReceived)}`),
-      hardBreak(`线上预计到账：${formatMoney(row.douyinExpectedReceived)}`),
       hardBreak(`线上营业额：${formatMoney(row.douyinTotal)}`),
       hardBreak(`门店总营业额：${formatMoney(row.businessRevenue)}`),
       hardBreak(`线下手续费：${formatMoney(row.lemengFee)}`),
@@ -387,9 +434,7 @@ function buildMarkdown(dateText, report, lemeng = null, douyin = null) {
       lines.push(
         "",
         hardBreak(`**${row.store}**`),
-        hardBreak(`实际到账：${formatMoney(row.actual)}`),
-        hardBreak(`预计到账：${formatMoney(row.expected)}`),
-        `合计：${formatMoney(row.total)}`,
+        `线上营业额：${formatMoney(row.total)}`,
       );
     }
   }
