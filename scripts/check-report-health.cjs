@@ -7,6 +7,14 @@ const statePath = path.resolve("output/report-health-state.json");
 const alertCooldownMs = Number(process.env.REPORT_ALERT_COOLDOWN_MS || 60 * 60 * 1000);
 const reportTimeoutMs = Number(process.env.REPORT_HEALTHCHECK_TIMEOUT_MS || 10 * 60 * 1000);
 
+function todayText() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function readJson(filePath) {
   try {
     return JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -29,7 +37,10 @@ function shouldAlert(now, problemKey) {
 
 function runReportPreview() {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["scripts/daily-report.cjs"], {
+    const scriptPath = process.env.DUAL_DOUYIN_REPORT_DATE === todayText()
+      ? "scripts/send-dual-douyin-report.cjs"
+      : "scripts/daily-report.cjs";
+    const child = spawn(process.execPath, [scriptPath], {
       cwd: process.cwd(),
       env: { ...process.env, NO_DINGTALK: "1" },
       stdio: ["ignore", "pipe", "pipe"],
