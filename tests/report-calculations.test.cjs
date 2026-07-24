@@ -106,7 +106,8 @@ test("does not calculate fees from an incomplete monthly cache", () => {
     },
   );
 
-  assert.match(markdown, /已完成 11\/24 天/);
+  assert.match(markdown, /本月数据正在分批拉取：已完成 11\/24 天/);
+  assert.match(markdown, /数据拉取进度：11\/24 天；完整前不展示本月券额/);
   assert.doesNotMatch(markdown, /抖音本月到店核销券额/);
   assert.doesNotMatch(markdown, /扣手续费后销售额/);
 });

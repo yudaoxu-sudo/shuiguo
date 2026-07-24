@@ -298,7 +298,7 @@ function buildMarkdown(dateText, report, lemeng = null, douyin = null) {
       if (douyin?.monthly) {
         const completed = douyin.monthly.cached_day_count;
         const total = completed + douyin.monthly.missing_dates.length;
-        lines.push(hardBreak(`抖音月度账单回补中：已完成 ${completed}/${total} 天，暂不参与手续费计算`));
+        lines.push(hardBreak(`抖音本月数据正在分批拉取：已完成 ${completed}/${total} 天；完整前暂不计算本月手续费`));
       }
     }
   }
@@ -350,7 +350,7 @@ function buildMarkdown(dateText, report, lemeng = null, douyin = null) {
         lines.push(
           "",
           `#### 抖音本月核销 ${douyin.monthly.report_month}`,
-          hardBreak(`账单回补进度：${completed}/${total} 天，完整前不展示部分金额`),
+          hardBreak(`数据拉取进度：${completed}/${total} 天；完整前不展示本月券额`),
         );
       }
     }

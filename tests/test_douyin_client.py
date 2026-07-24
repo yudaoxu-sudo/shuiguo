@@ -42,10 +42,20 @@ class SummarizeDailyDataTest(unittest.TestCase):
             ],
             [
                 {
+                    "ledger_id": "ledger-live-1",
+                    "certificate": {"certificate_id": "coupon-live"},
                     "amount": {"coupon_pay": 600, "goods": 580},
                     "order_attrribute": {"source": "livebroadcasting"},
                 },
                 {
+                    "ledger_id": "ledger-live-2",
+                    "certificate": {"certificate_id": "coupon-live"},
+                    "amount": {"coupon_pay": 600, "goods": 20},
+                    "order_attrribute": {"source": "livebroadcasting"},
+                },
+                {
+                    "ledger_id": "ledger-search",
+                    "certificate": {"certificate_id": "coupon-search"},
                     "amount": {"coupon_pay": 500, "goods": 470},
                     "order_attrribute": {"source": "search_result"},
                 },
@@ -59,12 +69,14 @@ class SummarizeDailyDataTest(unittest.TestCase):
         self.assertEqual(result["verification"]["verified_count"], 1)
         self.assertEqual(result["verification"]["verified_amount_cents"], 600)
         self.assertEqual(result["verification"]["verification_rate_percent"], 33.33)
-        self.assertEqual(result["settlement"]["estimated_income_cents"], 1050)
+        self.assertEqual(result["settlement"]["record_count"], 3)
+        self.assertEqual(result["settlement"]["estimated_income_cents"], 1070)
         self.assertEqual(result["live"]["paid_order_count"], 1)
         self.assertEqual(result["live"]["paid_coupon_count"], 2)
         self.assertEqual(result["live"]["sales_amount_cents"], 1200)
         self.assertEqual(result["live"]["verified_count"], 1)
-        self.assertEqual(result["live"]["estimated_income_cents"], 580)
+        self.assertEqual(result["live"]["verified_amount_cents"], 600)
+        self.assertEqual(result["live"]["estimated_income_cents"], 600)
 
     def test_zero_paid_coupons_has_no_rate(self):
         result = summarize_daily_data(date(2026, 7, 23), [], [], [])

@@ -113,6 +113,8 @@ def summarize_daily_data(
         if str((record.get("order_attrribute") or {}).get("source") or "").strip().lower()
         == "livebroadcasting"
     ]
+    ledger_summary = summarize_ledger_day(target_date, ledger_records)
+    live_ledger_summary = summarize_ledger_day(target_date, live_ledgers)
 
     paid_coupon_count = sum(as_int(order.get("count")) for order in paid_orders)
     verified_count = len(active_verifications)
@@ -135,25 +137,22 @@ def summarize_daily_data(
             "verification_rate_percent": percent(verified_count, paid_coupon_count),
         },
         "settlement": {
-            "record_count": len(ledger_records),
-            "estimated_income_cents": sum(
-                as_int((record.get("amount") or {}).get("goods"))
-                for record in ledger_records
-            ),
+            "record_count": ledger_summary["settlement"]["record_count"],
+            "estimated_income_cents": ledger_summary["settlement"][
+                "estimated_income_cents"
+            ],
         },
         "live": {
             "paid_order_count": len(live_orders),
             "paid_coupon_count": sum(as_int(order.get("count")) for order in live_orders),
             "sales_amount_cents": sum(as_int(order.get("pay_amount")) for order in live_orders),
-            "verified_count": len(live_ledgers),
-            "verified_amount_cents": sum(
-                as_int((record.get("amount") or {}).get("coupon_pay"))
-                for record in live_ledgers
-            ),
-            "estimated_income_cents": sum(
-                as_int((record.get("amount") or {}).get("goods"))
-                for record in live_ledgers
-            ),
+            "verified_count": live_ledger_summary["verification"]["verified_count"],
+            "verified_amount_cents": live_ledger_summary["verification"][
+                "verified_amount_cents"
+            ],
+            "estimated_income_cents": live_ledger_summary["settlement"][
+                "estimated_income_cents"
+            ],
         },
     }
 
@@ -214,6 +213,7 @@ def summarize_ledger_day(
             ),
         },
         "settlement": {
+            "record_count": len(seen_ledgers),
             "estimated_income_cents": sum(
                 row["estimated_income_cents"] for row in store_rows
             ),
