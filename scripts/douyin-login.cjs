@@ -74,7 +74,12 @@ async function waitForLogin(page) {
       await phoneInput.fill(phone);
       await passwordInput.fill(configuredPassword);
       await submitLogin(page);
-      await waitForFinanceDashboard(page);
+      try {
+        await waitForFinanceDashboard(page);
+      } catch (error) {
+        await addLoginDebug(page, error);
+        throw error;
+      }
       console.log("DOUYIN_LOGIN_OK");
       return;
     }
@@ -99,11 +104,33 @@ async function waitForLogin(page) {
     await codeInput.fill(code);
 
     await submitLogin(page);
-    await waitForFinanceDashboard(page);
+    try {
+      await waitForFinanceDashboard(page);
+    } catch (error) {
+      await addLoginDebug(page, error);
+      throw error;
+    }
     console.log("DOUYIN_LOGIN_OK");
   } finally {
     terminal.close();
   }
+}
+
+async function addLoginDebug(page, error) {
+  const outputDir = path.resolve("output/debug");
+  fs.mkdirSync(outputDir, { recursive: true });
+  const screenshotPath = path.join(outputDir, "douyin-login-failed.png");
+  await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+  const pageText = await page.locator("body").innerText({
+    timeout: 5000,
+  }).catch(() => "");
+  const loginSection = pageText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 45)
+    .join(" | ");
+  error.message = `${error.message}；页面提示 ${loginSection.slice(0, 600)}；截图 ${screenshotPath}`;
 }
 
 async function acceptAgreement(page) {
