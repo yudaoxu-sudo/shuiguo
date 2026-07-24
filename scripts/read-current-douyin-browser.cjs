@@ -120,7 +120,7 @@ async function waitForFinancePage(page) {
   await page.waitForFunction(() => {
     const text = document.body?.innerText || "";
     return text.includes("账单统计") || location.pathname.includes("/p/login");
-  }, { timeout: 60000 });
+  }, null, { timeout: 60000 });
 
   if (page.url().includes("/p/login")) {
     throw new Error("抖音来客登录态失效，需要运行 pnpm douyin:login 完成短信验证码登录");
@@ -165,6 +165,26 @@ async function extractMerchantDue(page) {
 }
 
 async function extractTable(page, requiredHeaders) {
+  await page.waitForFunction((headers) => {
+    const normalize = (value) => String(value || "").replace(/\s+/g, "");
+    const headerTables = [...document.querySelectorAll("table")].filter(
+      (table) => table.querySelector("thead th"),
+    );
+    return headerTables.some((headerTable) => {
+      const headerTexts = [...headerTable.querySelectorAll("thead th")]
+        .map((cell) => normalize(cell.innerText));
+      if (headers.some((header) => (
+        !headerTexts.some((text) => text.includes(normalize(header)))
+      ))) return false;
+
+      let wrapper = headerTable;
+      while (wrapper && wrapper.querySelectorAll("tbody tr").length === 0) {
+        wrapper = wrapper.parentElement;
+      }
+      return Boolean(wrapper?.querySelector("tbody tr"));
+    });
+  }, requiredHeaders, { timeout: 60000 });
+
   const result = await page.evaluate((headers) => {
     const normalize = (value) => String(value || "").replace(/\s+/g, "");
     const visible = (element) => {
@@ -175,16 +195,23 @@ async function extractTable(page, requiredHeaders) {
         && style.display !== "none"
         && style.visibility !== "hidden";
     };
-    const tables = [...document.querySelectorAll("table")].filter(visible);
-    for (const table of tables) {
-      const headerCells = [...table.querySelectorAll("thead th")];
+    const headerTables = [...document.querySelectorAll("table")]
+      .filter((table) => visible(table) && table.querySelector("thead th"));
+    for (const headerTable of headerTables) {
+      const headerCells = [...headerTable.querySelectorAll("thead th")];
       const headerTexts = headerCells.map((cell) => normalize(cell.innerText));
       const indexes = headers.map((header) => (
         headerTexts.findIndex((text) => text.includes(normalize(header)))
       ));
       if (indexes.some((index) => index < 0)) continue;
 
-      const rows = [...table.querySelectorAll("tbody tr")]
+      let wrapper = headerTable;
+      while (wrapper && wrapper.querySelectorAll("tbody tr").length === 0) {
+        wrapper = wrapper.parentElement;
+      }
+      if (!wrapper) continue;
+
+      const rows = [...wrapper.querySelectorAll("tbody tr")]
         .filter(visible)
         .map((row) => {
           const cells = [...row.querySelectorAll("td")];
