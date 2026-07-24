@@ -193,6 +193,7 @@ test("compares the aggregate API and webpage Douyin summaries", () => {
   const apiReport = {
     monthly: {
       complete: true,
+      generated_at: "2026-07-24T11:00:00.000Z",
       settlement: {
         actual_received_cents: 8000,
         expected_received_cents: 2000,
@@ -209,10 +210,13 @@ test("compares the aggregate API and webpage Douyin summaries", () => {
   browserReport.monthly.settlement.expected_received_cents = 1999;
   browserReport.monthly.settlement.merchant_due_cents = 9999;
   browserReport.monthly.stores[0].merchant_due_cents = 9999;
+  browserReport.monthly.generated_at = "2026-07-24T11:00:19.000Z";
   const different = compareDouyinSources(apiReport, browserReport);
   assert.equal(different.exact, false);
   assert.equal(different.total_difference_cents, 1);
   assert.equal(different.store_differences.length, 1);
+  assert.equal(different.read_gap_seconds, 19);
+  assert.match(comparisonText(different), /相隔 19 秒/);
 });
 
 test("withholds combined revenue and profit when the Douyin month is incomplete", () => {

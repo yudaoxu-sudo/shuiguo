@@ -96,6 +96,12 @@ function compareDouyinSources(apiReport, browserReport) {
         - (browserStores.get(store) || 0),
     }))
     .filter((row) => row.difference_cents !== 0);
+  const apiGeneratedAt = Date.parse(apiMonthly.generated_at || "");
+  const browserGeneratedAt = Date.parse(browserMonthly.generated_at || "");
+  const readGapSeconds = Number.isFinite(apiGeneratedAt)
+    && Number.isFinite(browserGeneratedAt)
+    ? Math.round(Math.abs(browserGeneratedAt - apiGeneratedAt) / 1000)
+    : null;
 
   return {
     exact: actualDiff === 0
@@ -106,6 +112,7 @@ function compareDouyinSources(apiReport, browserReport) {
     expected_difference_cents: expectedDiff,
     total_difference_cents: totalDiff,
     store_differences: storeDifferences,
+    read_gap_seconds: readGapSeconds,
   };
 }
 
@@ -126,6 +133,9 @@ function comparisonText(comparison) {
     `预计到账 ${formatCents(comparison.expected_difference_cents)}，`,
     `到账合计 ${formatCents(comparison.total_difference_cents)}，`,
     `门店差异 ${comparison.store_differences.length} 家。`,
+    Number.isInteger(comparison.read_gap_seconds)
+      ? `两次读取相隔 ${comparison.read_gap_seconds} 秒，期间抖音数据可能更新。`
+      : "",
   ].join("");
 }
 
