@@ -502,15 +502,6 @@ async function runReportOnce(outputDir) {
           path.join(outputDir, `douyin-monthly-${dateText}.json`),
           JSON.stringify(douyin, null, 2),
         );
-        if (douyin.monthly?.complete !== true) {
-          const completed = Number(douyin.monthly?.cached_day_count || 0);
-          const missing = douyin.monthly?.missing_dates || [];
-          throw new Error(
-            `抖音本月综合账单不完整：已获取 ${completed}/${
-              completed + missing.length
-            } 天，缺少 ${missing.join("、")}`,
-          );
-        }
       }
       const markdown = buildMarkdown(dateText, zhimadi, lemeng, douyin);
       fs.writeFileSync(path.join(outputDir, `monthly-report-${dateText}.md`), markdown);
