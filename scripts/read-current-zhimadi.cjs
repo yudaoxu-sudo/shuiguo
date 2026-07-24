@@ -326,10 +326,16 @@ function buildMarkdown(dateText, report, lemeng = null, douyin = null) {
       "#### 抖音直播来源",
       hardBreak(`成交：${douyin.live.paid_order_count} 单 / ${douyin.live.paid_coupon_count} 张券`),
       hardBreak(`成交额：${formatCents(douyin.live.sales_amount_cents)}`),
-      hardBreak(`核销：${douyin.live.verified_count} 张`),
-      hardBreak(`核销券额：${formatCents(douyin.live.verified_amount_cents)}`),
-      hardBreak(`券扣费后（按 ${formatPercent(douyinFeeRate * 100)}）：${formatCents(liveNetCouponAmount)}`),
     );
+    if (douyin.live.ledger_deduplicated === true) {
+      lines.push(
+        hardBreak(`核销：${douyin.live.verified_count} 张`),
+        hardBreak(`核销券额：${formatCents(douyin.live.verified_amount_cents)}`),
+        hardBreak(`券扣费后（按 ${formatPercent(douyinFeeRate * 100)}）：${formatCents(liveNetCouponAmount)}`),
+      );
+    } else {
+      lines.push(hardBreak("直播核销：本次旧缓存未按券去重，暂不展示"));
+    }
 
     if (douyin.monthly) {
       if (douyin.monthly.complete) {

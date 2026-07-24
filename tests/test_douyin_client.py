@@ -74,6 +74,7 @@ class SummarizeDailyDataTest(unittest.TestCase):
         self.assertEqual(result["live"]["paid_order_count"], 1)
         self.assertEqual(result["live"]["paid_coupon_count"], 2)
         self.assertEqual(result["live"]["sales_amount_cents"], 1200)
+        self.assertTrue(result["live"]["ledger_deduplicated"])
         self.assertEqual(result["live"]["verified_count"], 1)
         self.assertEqual(result["live"]["verified_amount_cents"], 600)
         self.assertEqual(result["live"]["estimated_income_cents"], 600)

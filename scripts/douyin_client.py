@@ -146,6 +146,7 @@ def summarize_daily_data(
             "paid_order_count": len(live_orders),
             "paid_coupon_count": sum(as_int(order.get("count")) for order in live_orders),
             "sales_amount_cents": sum(as_int(order.get("pay_amount")) for order in live_orders),
+            "ledger_deduplicated": True,
             "verified_count": live_ledger_summary["verification"]["verified_count"],
             "verified_amount_cents": live_ledger_summary["verification"][
                 "verified_amount_cents"
