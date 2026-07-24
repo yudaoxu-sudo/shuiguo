@@ -48,9 +48,11 @@ async function waitForSmsCodeFile(filePath) {
   const deadline = Date.now() + Number(process.env.DOUYIN_SMS_WAIT_MS || 5 * 60 * 1000);
   while (Date.now() < deadline) {
     if (fs.existsSync(filePath)) {
-      const code = fs.readFileSync(filePath, "utf8").trim();
-      fs.rmSync(filePath, { force: true });
-      return code;
+      const code = fs.readFileSync(filePath, "utf8").replace(/\s+/g, "");
+      if (/^\d{4,8}$/.test(code)) {
+        fs.rmSync(filePath, { force: true });
+        return code;
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
