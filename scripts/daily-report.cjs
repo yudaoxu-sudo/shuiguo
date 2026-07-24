@@ -104,6 +104,10 @@ function writeJson(filePath, data) {
 
 function incompleteDouyinResult(error) {
   const reportDate = todayText();
+  const rawMessage = String(error?.message || error);
+  const sourceError = isDouyinLoginError(error)
+    ? "抖音来客登录态失效"
+    : rawMessage.split("；调试文件")[0].slice(0, 180);
   return {
     report_month: reportDate.slice(0, 7),
     through_date: reportDate,
@@ -114,7 +118,7 @@ function incompleteDouyinResult(error) {
       generated_at: new Date().toISOString(),
       complete: false,
       source: process.env.DOUYIN_SOURCE || "browser",
-      source_error: String(error?.message || error).slice(0, 500),
+      source_error: sourceError,
       cached_day_count: 0,
       missing_dates: [],
       settlement: null,
