@@ -6,6 +6,43 @@ const { withLock } = require("./runtime-lock.cjs");
 const { loadEnv } = require("./send-dingtalk.cjs");
 
 const financeUrl = "https://life.douyin.com/p/finance/v2/home";
+const safeDiagnosticKeys = new Set([
+  "captcha",
+  "code",
+  "description",
+  "error_code",
+  "message",
+  "msg",
+  "status",
+  "status_code",
+  "verify_method",
+  "verify_type",
+]);
+
+function collectSafeDiagnosticFields(value, prefix = "", depth = 0, output = {}) {
+  if (!value || typeof value !== "object" || depth > 5) return output;
+  for (const [key, child] of Object.entries(value)) {
+    const childPath = prefix ? `${prefix}.${key}` : key;
+    if (
+      safeDiagnosticKeys.has(key.toLowerCase())
+      && ["string", "number", "boolean"].includes(typeof child)
+    ) {
+      output[childPath] = String(child).slice(0, 300);
+    }
+    if (child && typeof child === "object") {
+      collectSafeDiagnosticFields(child, childPath, depth + 1, output);
+    }
+  }
+  return output;
+}
+
+async function readSafeResponseDetails(response) {
+  try {
+    return collectSafeDiagnosticFields(await response.json());
+  } catch {
+    return {};
+  }
+}
 
 async function firstVisible(locator) {
   const count = await locator.count();
@@ -18,7 +55,7 @@ async function firstVisible(locator) {
 
 async function waitForLogin(page) {
   const networkTrace = [];
-  page.on("response", (response) => {
+  page.on("response", async (response) => {
     const resourceType = response.request().resourceType();
     if (!["xhr", "fetch"].includes(resourceType)) return;
     let requestPath = response.url();
@@ -28,12 +65,16 @@ async function waitForLogin(page) {
     } catch {
       // Keep the original URL when parsing fails.
     }
-    networkTrace.push({
+    const traceItem = {
       method: response.request().method(),
       status: response.status(),
       url: requestPath,
-    });
+    };
+    networkTrace.push(traceItem);
     if (networkTrace.length > 80) networkTrace.shift();
+    if (requestPath.includes("/account_login/")) {
+      traceItem.details = await readSafeResponseDetails(response);
+    }
   });
 
   await page.goto(process.env.DOUYIN_FINANCE_URL || financeUrl, {
@@ -43,7 +84,7 @@ async function waitForLogin(page) {
   await page.waitForFunction(() => (
     location.pathname.includes("/p/login")
       || (document.body?.innerText || "").includes("账单统计")
-  ), { timeout: 60000 });
+  ), null, { timeout: 60000 });
 
   if (!page.url().includes("/p/login")) {
     console.log("DOUYIN_LOGIN_OK");
@@ -52,7 +93,7 @@ async function waitForLogin(page) {
   await page.waitForFunction(() => {
     const text = document.body?.innerText || "";
     return text.includes("立即登录") || text.includes("登录抖音来客");
-  }, { timeout: 60000 });
+  }, null, { timeout: 60000 });
 
   const existingLogin = await firstVisible(
     page.getByText("立即登录", { exact: true }),
@@ -200,7 +241,8 @@ async function submitLogin(page) {
 }
 
 async function waitForFinanceDashboard(page) {
-  await page.waitForFunction(() => !location.pathname.includes("/p/login"), {
+  await page.waitForFunction(() => !location.pathname.includes("/p/login"), null, {
+    polling: 500,
     timeout: 60000,
   });
   await page.goto(process.env.DOUYIN_FINANCE_URL || financeUrl, {
