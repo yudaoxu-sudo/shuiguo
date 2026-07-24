@@ -102,31 +102,6 @@ function writeJson(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
 }
 
-function incompleteDouyinResult(error) {
-  const reportDate = todayText();
-  const rawMessage = String(error?.message || error);
-  const sourceError = isDouyinLoginError(error)
-    ? "抖音来客登录态失效"
-    : rawMessage.split("；调试文件")[0].slice(0, 180);
-  return {
-    report_month: reportDate.slice(0, 7),
-    through_date: reportDate,
-    generated_at: new Date().toISOString(),
-    monthly: {
-      report_month: reportDate.slice(0, 7),
-      through_date: reportDate,
-      generated_at: new Date().toISOString(),
-      complete: false,
-      source: process.env.DOUYIN_SOURCE || "browser",
-      source_error: sourceError,
-      cached_day_count: 0,
-      missing_dates: [],
-      settlement: null,
-      stores: [],
-    },
-  };
-}
-
 function isZhimadiLoginError(error) {
   return String(error?.message || error).includes("芝麻地登录态失效");
 }
@@ -520,19 +495,13 @@ async function runReportOnce(outputDir) {
       const attempts = Number(process.env.REPORT_STEP_ATTEMPTS || 3);
       const zhimadi = await retryStep("芝麻地报表", () => withFreshPage(context, "zhimadi", readZhimadi), attempts);
       const lemeng = await retryStep("乐檬报表", () => withFreshPage(context, "lemeng", readLemeng), attempts);
-      let douyin = null;
-      if (process.env.DOUYIN_ENABLED === "true") {
-        try {
-          douyin = await retryStep(
-            "抖音报表",
-            () => readDouyin(undefined, context),
-            attempts,
-          );
-        } catch (error) {
-          console.warn(`抖音汇总暂不可用，继续生成芝麻地和乐檬月报：${error.message}`);
-          douyin = incompleteDouyinResult(error);
-        }
-      }
+      const douyin = process.env.DOUYIN_ENABLED === "true"
+        ? await retryStep(
+          "抖音报表",
+          () => readDouyin(undefined, context),
+          attempts,
+        )
+        : null;
       const dateText = todayText();
       fs.writeFileSync(path.join(outputDir, `zhimadi-monthly-${dateText}.json`), JSON.stringify(zhimadi, null, 2));
       fs.writeFileSync(path.join(outputDir, `lemeng-monthly-${dateText}.json`), JSON.stringify(lemeng, null, 2));
