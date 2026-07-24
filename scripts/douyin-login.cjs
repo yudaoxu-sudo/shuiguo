@@ -17,6 +17,25 @@ async function firstVisible(locator) {
 }
 
 async function waitForLogin(page) {
+  const networkTrace = [];
+  page.on("response", (response) => {
+    const resourceType = response.request().resourceType();
+    if (!["xhr", "fetch"].includes(resourceType)) return;
+    let requestPath = response.url();
+    try {
+      const url = new URL(requestPath);
+      requestPath = `${url.origin}${url.pathname}`;
+    } catch {
+      // Keep the original URL when parsing fails.
+    }
+    networkTrace.push({
+      method: response.request().method(),
+      status: response.status(),
+      url: requestPath,
+    });
+    if (networkTrace.length > 80) networkTrace.shift();
+  });
+
   await page.goto(process.env.DOUYIN_FINANCE_URL || financeUrl, {
     waitUntil: "commit",
     timeout: 60000,
@@ -77,7 +96,7 @@ async function waitForLogin(page) {
       try {
         await waitForFinanceDashboard(page);
       } catch (error) {
-        await addLoginDebug(page, error);
+        await addLoginDebug(page, error, networkTrace);
         throw error;
       }
       console.log("DOUYIN_LOGIN_OK");
@@ -107,7 +126,7 @@ async function waitForLogin(page) {
     try {
       await waitForFinanceDashboard(page);
     } catch (error) {
-      await addLoginDebug(page, error);
+      await addLoginDebug(page, error, networkTrace);
       throw error;
     }
     console.log("DOUYIN_LOGIN_OK");
@@ -116,20 +135,44 @@ async function waitForLogin(page) {
   }
 }
 
-async function addLoginDebug(page, error) {
+async function addLoginDebug(page, error, networkTrace) {
   const outputDir = path.resolve("output/debug");
   fs.mkdirSync(outputDir, { recursive: true });
   const screenshotPath = path.join(outputDir, "douyin-login-failed.png");
+  const detailsPath = path.join(outputDir, "douyin-login-failed.json");
   await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
   const pageText = await page.locator("body").innerText({
     timeout: 5000,
   }).catch(() => "");
+  const visibleErrors = await page.evaluate(() => {
+    const visible = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return rect.width > 0
+        && rect.height > 0
+        && style.display !== "none"
+        && style.visibility !== "hidden";
+    };
+    return [...document.querySelectorAll(
+      '[role="alert"], [class*="error"], [class*="message"], [class*="toast"]',
+    )]
+      .filter(visible)
+      .map((element) => element.innerText.trim())
+      .filter(Boolean)
+      .slice(0, 20);
+  }).catch(() => []);
   const loginSection = pageText
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
     .slice(0, 45)
     .join(" | ");
+  fs.writeFileSync(detailsPath, JSON.stringify({
+    capturedAt: new Date().toISOString(),
+    url: page.url(),
+    visibleErrors,
+    networkTrace,
+  }, null, 2));
   error.message = `${error.message}；页面提示 ${loginSection.slice(0, 600)}；截图 ${screenshotPath}`;
 }
 
