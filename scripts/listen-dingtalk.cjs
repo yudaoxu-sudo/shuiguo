@@ -165,7 +165,11 @@ function runMonthlyReport() {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["scripts/daily-report.cjs"], {
       cwd: process.cwd(),
-      env: { ...process.env, REPORT_MANAGED_BY_LISTENER: "1" },
+      env: {
+        ...process.env,
+        REPORT_MANAGED_BY_LISTENER: "1",
+        REPORT_FAILURE_ALERTS: "false",
+      },
       stdio: ["ignore", "pipe", "pipe"],
     });
 
