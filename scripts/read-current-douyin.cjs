@@ -21,7 +21,7 @@ async function readDouyin(targetDate) {
   const { stdout } = await execFileAsync(pythonExecutable(), args, {
     cwd: path.resolve("."),
     env: process.env,
-    timeout: Number(process.env.DOUYIN_PROCESS_TIMEOUT_MS || 8 * 60 * 1000),
+    timeout: Number(process.env.DOUYIN_PROCESS_TIMEOUT_MS || 15 * 60 * 1000),
     maxBuffer: 10 * 1024 * 1024,
   });
 

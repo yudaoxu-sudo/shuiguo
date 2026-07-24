@@ -8,6 +8,7 @@ import json
 import os
 import random
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -157,6 +158,112 @@ def summarize_daily_data(
     }
 
 
+def summarize_ledger_day(
+    target_date: date,
+    ledger_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    stores: dict[str, dict[str, int]] = defaultdict(
+        lambda: {
+            "verified_count": 0,
+            "verified_amount_cents": 0,
+            "estimated_income_cents": 0,
+        }
+    )
+    seen_certificates: set[str] = set()
+
+    for record in ledger_records:
+        certificate_id = str(
+            (record.get("certificate") or {}).get("certificate_id") or ""
+        )
+        dedupe_key = certificate_id or str(record.get("ledger_id") or record.get("id") or "")
+        if not dedupe_key or dedupe_key in seen_certificates:
+            continue
+        seen_certificates.add(dedupe_key)
+
+        poi_id = str(record.get("poi_id") or "").strip()
+        amount = record.get("amount") or {}
+        store = stores[poi_id]
+        store["verified_count"] += 1
+        store["verified_amount_cents"] += as_int(amount.get("coupon_pay"))
+        store["estimated_income_cents"] += as_int(amount.get("goods"))
+
+    store_rows = [
+        {"poi_id": poi_id, **values}
+        for poi_id, values in stores.items()
+    ]
+    return {
+        "report_date": target_date.isoformat(),
+        "generated_at": datetime.now(SHANGHAI).isoformat(timespec="seconds"),
+        "verification": {
+            "verified_count": sum(row["verified_count"] for row in store_rows),
+            "verified_amount_cents": sum(
+                row["verified_amount_cents"] for row in store_rows
+            ),
+        },
+        "settlement": {
+            "estimated_income_cents": sum(
+                row["estimated_income_cents"] for row in store_rows
+            ),
+        },
+        "stores": store_rows,
+    }
+
+
+def merge_ledger_days(
+    through_date: date,
+    daily_summaries: list[dict[str, Any]],
+    shop_names: dict[str, str],
+) -> dict[str, Any]:
+    stores: dict[str, dict[str, int]] = defaultdict(
+        lambda: {
+            "verified_count": 0,
+            "verified_amount_cents": 0,
+            "estimated_income_cents": 0,
+        }
+    )
+
+    for summary in daily_summaries:
+        for row in summary.get("stores") or []:
+            poi_id = str(row.get("poi_id") or "")
+            store = stores[poi_id]
+            store["verified_count"] += as_int(row.get("verified_count"))
+            store["verified_amount_cents"] += as_int(
+                row.get("verified_amount_cents")
+            )
+            store["estimated_income_cents"] += as_int(
+                row.get("estimated_income_cents")
+            )
+
+    store_rows = [
+        {
+            "poi_id": poi_id,
+            "store": shop_names.get(poi_id) or f"未识别抖音门店({poi_id[-4:]})",
+            **values,
+        }
+        for poi_id, values in stores.items()
+    ]
+    store_rows.sort(key=lambda row: row["verified_amount_cents"], reverse=True)
+
+    return {
+        "report_month": through_date.strftime("%Y-%m"),
+        "through_date": through_date.isoformat(),
+        "generated_at": datetime.now(SHANGHAI).isoformat(timespec="seconds"),
+        "verification": {
+            "verified_count": sum(row["verified_count"] for row in store_rows),
+            "verified_amount_cents": sum(
+                row["verified_amount_cents"] for row in store_rows
+            ),
+        },
+        "settlement": {
+            "estimated_income_cents": sum(
+                row["estimated_income_cents"] for row in store_rows
+            ),
+        },
+        "stores": store_rows,
+        "cached_day_count": len(daily_summaries),
+    }
+
+
 class DouyinClient:
     def __init__(
         self,
@@ -177,6 +284,16 @@ class DouyinClient:
         self.max_pages = max(1, int(os.environ.get("DOUYIN_MAX_PAGES", "500")))
         self.token_cache_path = Path(
             os.environ.get("DOUYIN_TOKEN_CACHE", "output/douyin-token.json")
+        )
+        self.ledger_cache_dir = Path(
+            os.environ.get(
+                "DOUYIN_LEDGER_CACHE_DIR",
+                "output/douyin-ledger-daily",
+            )
+        )
+        self.current_day_cache_seconds = max(
+            0,
+            int(os.environ.get("DOUYIN_CURRENT_DAY_CACHE_SECONDS", "600")),
         )
         self.session = requests.Session()
         self.session.headers.update({"content-type": "application/json"})
@@ -420,12 +537,123 @@ class DouyinClient:
 
         raise DouyinAPIError(f"抖音账单超过分页上限 {self.max_pages}")
 
+    def query_shops(self) -> list[dict[str, str]]:
+        shops: dict[str, str] = {}
+        page = 1
+        while page <= self.max_pages:
+            data = self._get(
+                "/goodlife/v1/shop/poi/query/",
+                {
+                    "account_id": self.account_id,
+                    "page": page,
+                    "size": 50,
+                    "relation_type": 0,
+                },
+            )
+            batch = data.get("pois") or []
+            for item in batch:
+                poi = item.get("poi") or {}
+                poi_id = str(poi.get("poi_id") or "").strip()
+                poi_name = str(poi.get("poi_name") or "").strip()
+                if poi_id:
+                    shops[poi_id] = poi_name or poi_id
+
+            if len(batch) < 50 or page * 50 >= as_int(data.get("total")):
+                break
+            page += 1
+
+        return [
+            {"poi_id": poi_id, "store": store}
+            for poi_id, store in shops.items()
+        ]
+
+    def _ledger_cache_path(self, target_date: date) -> Path:
+        return self.ledger_cache_dir / f"{target_date.isoformat()}.json"
+
+    def _load_ledger_day_cache(self, target_date: date) -> dict[str, Any] | None:
+        cache_path = self._ledger_cache_path(target_date)
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
+
+        today = datetime.now(SHANGHAI).date()
+        try:
+            generated_at = datetime.fromisoformat(str(cached["generated_at"]))
+            if generated_at.tzinfo is None:
+                generated_at = generated_at.replace(tzinfo=SHANGHAI)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+        if target_date == today:
+            age_seconds = (datetime.now(SHANGHAI) - generated_at).total_seconds()
+            return cached if age_seconds <= self.current_day_cache_seconds else None
+        if target_date > today:
+            return None
+        if target_date == today - timedelta(days=1):
+            if generated_at.date() < today:
+                return None
+        return cached
+
+    def _save_ledger_day_cache(
+        self,
+        target_date: date,
+        summary: dict[str, Any],
+    ) -> None:
+        cache_path = self._ledger_cache_path(target_date)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = cache_path.with_suffix(".tmp")
+        temp_path.write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temp_path.replace(cache_path)
+
+    def ledger_day_summary(
+        self,
+        target_date: date,
+        ledger_records: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        if ledger_records is None:
+            cached = self._load_ledger_day_cache(target_date)
+            if cached:
+                return cached
+            ledger_records = self.query_ledger(target_date)
+
+        summary = summarize_ledger_day(target_date, ledger_records)
+        self._save_ledger_day_cache(target_date, summary)
+        return summary
+
+    def monthly_ledger_summary(self, through_date: date) -> dict[str, Any]:
+        month_start = through_date.replace(day=1)
+        daily_summaries: list[dict[str, Any]] = []
+        current = month_start
+        while current <= through_date:
+            daily_summaries.append(self.ledger_day_summary(current))
+            current += timedelta(days=1)
+
+        shop_names = {
+            row["poi_id"]: row["store"]
+            for row in self.query_shops()
+        }
+        return merge_ledger_days(through_date, daily_summaries, shop_names)
+
     def daily_summary(self, target_date: date) -> dict[str, Any]:
         period = date_range(target_date)
         orders = self.query_orders(period)
         verifications = self.query_verifications(period)
         ledger_records = self.query_ledger(target_date)
+        self.ledger_day_summary(target_date, ledger_records)
         return summarize_daily_data(target_date, orders, verifications, ledger_records)
+
+    def report_summary(
+        self,
+        target_date: date,
+        month_through: date,
+    ) -> dict[str, Any]:
+        result = self.daily_summary(target_date)
+        result["monthly"] = self.monthly_ledger_summary(month_through)
+        return result
 
 
 def pull_yesterday_orders(client: DouyinClient | None = None) -> list[dict[str, Any]]:
@@ -461,11 +689,20 @@ def pull_yesterday_live_data(client: DouyinClient | None = None) -> dict[str, An
 def main() -> None:
     parser = argparse.ArgumentParser(description="读取抖音来客昨日经营数据")
     parser.add_argument("--date", help="读取日期，格式 YYYY-MM-DD；默认昨天")
+    parser.add_argument(
+        "--month-through",
+        help="月度核销账单统计到哪一天，格式 YYYY-MM-DD；默认今天",
+    )
     parser.add_argument("--pretty", action="store_true", help="格式化 JSON 输出")
     args = parser.parse_args()
 
     target_date = date.fromisoformat(args.date) if args.date else yesterday()
-    result = DouyinClient().daily_summary(target_date)
+    month_through = (
+        date.fromisoformat(args.month_through)
+        if args.month_through
+        else datetime.now(SHANGHAI).date()
+    )
+    result = DouyinClient().report_summary(target_date, month_through)
     print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None))
 
 
