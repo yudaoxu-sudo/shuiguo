@@ -101,7 +101,7 @@ pnpm listen
 pnpm douyin:login
 ```
 
-按提示输入抖音来客手机号和短信验证码。登录态保存在 `output/browser-profile`，后续日报直接复用。
+配置抖音来客手机号和密码后运行。没有配置密码时，脚本会提示输入短信验证码。登录态保存在 `output/browser-profile`，后续日报直接复用。
 
 在服务器 `.env` 中配置：
 
@@ -110,6 +110,7 @@ DOUYIN_ENABLED=true
 DOUYIN_SOURCE=browser
 DOUYIN_FINANCE_URL=https://life.douyin.com/p/finance/v2/home
 DOUYIN_PHONE=
+DOUYIN_PASSWORD=
 ```
 
 独立测试本月汇总：

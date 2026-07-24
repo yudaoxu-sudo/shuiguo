@@ -36,6 +36,7 @@ async function waitForLogin(page) {
   );
   if (existingLogin) await existingLogin.click();
 
+  const configuredPassword = process.env.DOUYIN_PASSWORD || "";
   const terminal = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -45,17 +46,32 @@ async function waitForLogin(page) {
       || (await terminal.question("抖音来客手机号：")).trim();
     if (!/^\d{11}$/.test(phone)) throw new Error("抖音来客手机号格式不正确");
 
+    if (configuredPassword) {
+      const passwordLogin = await firstVisible(
+        page.getByText("密码登录", { exact: true }),
+      );
+      if (passwordLogin) await passwordLogin.click();
+
+      const phoneInput = await firstVisible(page.getByPlaceholder("手机号码"));
+      const passwordInput = await firstVisible(page.getByPlaceholder("密码"));
+      if (!phoneInput || !passwordInput) {
+        throw new Error("抖音来客密码登录表单没有加载");
+      }
+      await phoneInput.fill(phone);
+      await passwordInput.fill(configuredPassword);
+      await submitLogin(page);
+      await waitForFinanceDashboard(page);
+      console.log("DOUYIN_LOGIN_OK");
+      return;
+    }
+
     const phoneInput = await firstVisible(page.getByPlaceholder("手机号码"));
     const codeInput = await firstVisible(page.getByPlaceholder("验证码"));
     if (!phoneInput || !codeInput) {
       throw new Error("抖音来客登录表单没有加载");
     }
     await phoneInput.fill(phone);
-
-    const agreement = page.locator('input[type="checkbox"]');
-    if ((await agreement.count()) === 1 && !(await agreement.isChecked())) {
-      await agreement.check({ force: true });
-    }
+    await acceptAgreement(page);
 
     const sendCode = await firstVisible(
       page.getByText("发送验证码", { exact: true }),
@@ -68,27 +84,42 @@ async function waitForLogin(page) {
     if (!/^\d{4,8}$/.test(code)) throw new Error("短信验证码格式不正确");
     await codeInput.fill(code);
 
-    const loginButton = await firstVisible(
-      page.getByRole("button", { name: "登录", exact: true }),
-    );
-    if (!loginButton) throw new Error("抖音来客没有找到登录按钮");
-    await loginButton.click();
-
-    await page.waitForFunction(() => !location.pathname.includes("/p/login"), {
-      timeout: 60000,
-    });
-    await page.goto(process.env.DOUYIN_FINANCE_URL || financeUrl, {
-      waitUntil: "commit",
-      timeout: 60000,
-    });
-    await page.getByText("账单统计", { exact: true }).waitFor({
-      state: "visible",
-      timeout: 60000,
-    });
+    await submitLogin(page);
+    await waitForFinanceDashboard(page);
     console.log("DOUYIN_LOGIN_OK");
   } finally {
     terminal.close();
   }
+}
+
+async function acceptAgreement(page) {
+  const agreement = page.locator('input[type="checkbox"]');
+  if ((await agreement.count()) === 1 && !(await agreement.isChecked())) {
+    await agreement.check({ force: true });
+  }
+}
+
+async function submitLogin(page) {
+  await acceptAgreement(page);
+  const loginButton = await firstVisible(
+    page.getByRole("button", { name: "登录", exact: true }),
+  );
+  if (!loginButton) throw new Error("抖音来客没有找到登录按钮");
+  await loginButton.click();
+}
+
+async function waitForFinanceDashboard(page) {
+  await page.waitForFunction(() => !location.pathname.includes("/p/login"), {
+    timeout: 60000,
+  });
+  await page.goto(process.env.DOUYIN_FINANCE_URL || financeUrl, {
+    waitUntil: "commit",
+    timeout: 60000,
+  });
+  await page.getByText("账单统计", { exact: true }).waitFor({
+    state: "visible",
+    timeout: 60000,
+  });
 }
 
 async function main() {
@@ -120,4 +151,3 @@ if (require.main === module) {
     process.exit(1);
   });
 }
-
