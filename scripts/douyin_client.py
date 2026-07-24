@@ -26,7 +26,6 @@ RETRYABLE_ERROR_CODES = {
     2100001,
     2100004,
     2119002,
-    2119003,
     28001005,
     28001006,
     5000001,
@@ -228,12 +227,27 @@ class DouyinClient:
             0,
             int(os.environ.get("DOUYIN_CURRENT_DAY_CACHE_SECONDS", "600")),
         )
+        self.request_interval_seconds = max(
+            0.0,
+            float(os.environ.get("DOUYIN_REQUEST_INTERVAL_SECONDS", "0.1")),
+        )
+        self.rate_limit_cooldown_seconds = max(
+            60,
+            int(os.environ.get("DOUYIN_RATE_LIMIT_COOLDOWN_SECONDS", "3600")),
+        )
+        self.rate_limit_state_path = Path(
+            os.environ.get(
+                "DOUYIN_RATE_LIMIT_STATE",
+                "output/douyin-rate-limit.json",
+            )
+        )
         self.settlement_days = max(
             0,
             int(os.environ.get("DOUYIN_SETTLEMENT_DAYS", "5")),
         )
         self.session = requests.Session()
         self.session.headers.update({"content-type": "application/json"})
+        self._last_request_at = 0.0
 
         missing = [
             name
@@ -246,6 +260,52 @@ class DouyinClient:
         ]
         if missing:
             raise ValueError(f"缺少抖音配置：{', '.join(missing)}")
+
+    def _wait_for_request_slot(self) -> None:
+        elapsed = time.monotonic() - self._last_request_at
+        wait_seconds = self.request_interval_seconds - elapsed
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+        self._last_request_at = time.monotonic()
+
+    def _active_rate_limit_retry_at(self) -> datetime | None:
+        try:
+            payload = json.loads(
+                self.rate_limit_state_path.read_text(encoding="utf-8")
+            )
+            retry_at = datetime.fromisoformat(str(payload["retry_at"]))
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=SHANGHAI)
+        except (FileNotFoundError, KeyError, TypeError, ValueError, OSError):
+            return None
+
+        if retry_at > datetime.now(SHANGHAI):
+            return retry_at
+        try:
+            self.rate_limit_state_path.unlink()
+        except OSError:
+            pass
+        return None
+
+    def _mark_rate_limited(self) -> datetime:
+        retry_at = datetime.now(SHANGHAI) + timedelta(
+            seconds=self.rate_limit_cooldown_seconds
+        )
+        self.rate_limit_state_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.rate_limit_state_path.with_suffix(".tmp")
+        temp_path.write_text(
+            json.dumps(
+                {
+                    "error_code": 2119003,
+                    "retry_at": retry_at.isoformat(timespec="seconds"),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        temp_path.replace(self.rate_limit_state_path)
+        return retry_at
 
     @staticmethod
     def _response_error(payload: dict[str, Any]) -> tuple[int | None, str]:
@@ -303,6 +363,7 @@ class DouyinClient:
         last_error: Exception | None = None
         for attempt in range(self.retry_attempts):
             try:
+                self._wait_for_request_slot()
                 response = self.session.post(
                     f"{self.api_base}/oauth/client_token/",
                     json={
@@ -362,6 +423,7 @@ class DouyinClient:
 
         for attempt in range(self.retry_attempts):
             try:
+                self._wait_for_request_slot()
                 response = self.session.get(
                     f"{self.api_base}{path}",
                     params=params,
@@ -534,17 +596,20 @@ class DouyinClient:
             current += timedelta(days=1)
 
         daily_summaries: list[dict[str, Any]] = []
-        rate_limited = False
-        for target_date in target_dates:
-            try:
-                daily_summaries.append(
-                    self.settlement_day_summary(target_date)
-                )
-            except DouyinAPIError as error:
-                if error.code != 2119003:
-                    raise
-                rate_limited = True
-                break
+        retry_at = self._active_rate_limit_retry_at()
+        rate_limited = retry_at is not None
+        if not rate_limited:
+            for target_date in target_dates:
+                try:
+                    daily_summaries.append(
+                        self.settlement_day_summary(target_date)
+                    )
+                except DouyinAPIError as error:
+                    if error.code != 2119003:
+                        raise
+                    rate_limited = True
+                    retry_at = self._mark_rate_limited()
+                    break
 
         if rate_limited:
             daily_summaries = [
@@ -566,7 +631,7 @@ class DouyinClient:
             row["poi_id"]: row["store"]
             for row in self.query_shops()
         }
-        return merge_composite_bill_days(
+        result = merge_composite_bill_days(
             through_date,
             daily_summaries,
             shop_names,
@@ -574,6 +639,11 @@ class DouyinClient:
             rate_limited,
             self.settlement_days,
         )
+        if retry_at:
+            result["rate_limit_retry_at"] = retry_at.isoformat(
+                timespec="seconds"
+            )
+        return result
 
     def report_summary(self, month_through: date) -> dict[str, Any]:
         return {
