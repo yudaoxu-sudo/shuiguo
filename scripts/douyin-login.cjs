@@ -109,7 +109,14 @@ async function waitForLogin(page) {
 async function acceptAgreement(page) {
   const agreement = page.locator('input[type="checkbox"]');
   if ((await agreement.count()) === 1 && !(await agreement.isChecked())) {
-    await agreement.check({ force: true });
+    const visibleControl = await firstVisible(
+      page.locator("label.life-core-checkbox"),
+    );
+    if (!visibleControl) throw new Error("抖音来客登录协议控件没有加载");
+    await visibleControl.click();
+    if (!(await agreement.isChecked())) {
+      throw new Error("抖音来客登录协议未勾选");
+    }
   }
 }
 
