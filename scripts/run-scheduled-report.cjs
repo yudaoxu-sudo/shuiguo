@@ -31,9 +31,9 @@ function appendTail(current, chunk, limit = 4000) {
   return `${current}${chunk}`.slice(-limit);
 }
 
-function runReport() {
+function runReport(scriptPath = "scripts/daily-report.cjs") {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["scripts/daily-report.cjs"], {
+    const child = spawn(process.execPath, [scriptPath], {
       cwd: process.cwd(),
       env: {
         ...process.env,
@@ -80,7 +80,11 @@ async function main() {
       startedAt: new Date().toISOString(),
     });
 
-    const result = await runReport();
+    const dualReportDate = String(process.env.DUAL_DOUYIN_REPORT_DATE || "");
+    const scriptPath = dualReportDate === date
+      ? "scripts/send-dual-douyin-report.cjs"
+      : "scripts/daily-report.cjs";
+    const result = await runReport(scriptPath);
     if (result.code === 0) {
       writeJson(statePath, {
         date,

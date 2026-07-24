@@ -493,8 +493,27 @@ async function runReportOnce(outputDir) {
 
     try {
       const attempts = Number(process.env.REPORT_STEP_ATTEMPTS || 3);
-      const zhimadi = await retryStep("芝麻地报表", () => withFreshPage(context, "zhimadi", readZhimadi), attempts);
-      const lemeng = await retryStep("乐檬报表", () => withFreshPage(context, "lemeng", readLemeng), attempts);
+      const dateText = todayText();
+      const reuseBaseSuffix = String(process.env.REPORT_REUSE_BASE_SUFFIX || "")
+        .replace(/[^A-Za-z0-9_-]/g, "");
+      let zhimadi;
+      let lemeng;
+      if (reuseBaseSuffix) {
+        zhimadi = readJson(path.join(
+          outputDir,
+          `zhimadi-monthly-${dateText}-${reuseBaseSuffix}.json`,
+        ));
+        lemeng = readJson(path.join(
+          outputDir,
+          `lemeng-monthly-${dateText}-${reuseBaseSuffix}.json`,
+        ));
+        if (!zhimadi || !lemeng) {
+          throw new Error(`没有找到可复用的基础报表快照：${reuseBaseSuffix}`);
+        }
+      } else {
+        zhimadi = await retryStep("芝麻地报表", () => withFreshPage(context, "zhimadi", readZhimadi), attempts);
+        lemeng = await retryStep("乐檬报表", () => withFreshPage(context, "lemeng", readLemeng), attempts);
+      }
       const douyin = process.env.DOUYIN_ENABLED === "true"
         ? await retryStep(
           "抖音报表",
@@ -502,17 +521,19 @@ async function runReportOnce(outputDir) {
           attempts,
         )
         : null;
-      const dateText = todayText();
-      fs.writeFileSync(path.join(outputDir, `zhimadi-monthly-${dateText}.json`), JSON.stringify(zhimadi, null, 2));
-      fs.writeFileSync(path.join(outputDir, `lemeng-monthly-${dateText}.json`), JSON.stringify(lemeng, null, 2));
+      const outputSuffix = String(process.env.REPORT_OUTPUT_SUFFIX || "")
+        .replace(/[^A-Za-z0-9_-]/g, "");
+      const suffix = outputSuffix ? `-${outputSuffix}` : "";
+      fs.writeFileSync(path.join(outputDir, `zhimadi-monthly-${dateText}${suffix}.json`), JSON.stringify(zhimadi, null, 2));
+      fs.writeFileSync(path.join(outputDir, `lemeng-monthly-${dateText}${suffix}.json`), JSON.stringify(lemeng, null, 2));
       if (douyin) {
         fs.writeFileSync(
-          path.join(outputDir, `douyin-monthly-${dateText}.json`),
+          path.join(outputDir, `douyin-monthly-${dateText}${suffix}.json`),
           JSON.stringify(douyin, null, 2),
         );
       }
       const markdown = buildMarkdown(dateText, zhimadi, lemeng, douyin);
-      fs.writeFileSync(path.join(outputDir, `monthly-report-${dateText}.md`), markdown);
+      fs.writeFileSync(path.join(outputDir, `monthly-report-${dateText}${suffix}.md`), markdown);
       await sendDingTalk(markdown);
     } finally {
       await context.close();
