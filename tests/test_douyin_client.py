@@ -128,6 +128,20 @@ class SummarizeDailyDataTest(unittest.TestCase):
         self.assertEqual(result["verification"]["verified_count"], 3)
         self.assertEqual(result["verification"]["verified_amount_cents"], 2300)
         self.assertEqual(result["stores"][0]["store"], "有花头(白溪店)")
+        self.assertTrue(result["complete"])
+
+    def test_marks_monthly_summary_incomplete_when_dates_are_missing(self):
+        result = merge_ledger_days(
+            date(2026, 7, 24),
+            [],
+            {},
+            [date(2026, 7, 23), date(2026, 7, 24)],
+            True,
+        )
+
+        self.assertFalse(result["complete"])
+        self.assertTrue(result["rate_limited"])
+        self.assertEqual(result["missing_dates"], ["2026-07-23", "2026-07-24"])
 
 
 if __name__ == "__main__":

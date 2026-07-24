@@ -213,6 +213,8 @@ def merge_ledger_days(
     through_date: date,
     daily_summaries: list[dict[str, Any]],
     shop_names: dict[str, str],
+    missing_dates: list[date] | None = None,
+    rate_limited: bool = False,
 ) -> dict[str, Any]:
     stores: dict[str, dict[str, int]] = defaultdict(
         lambda: {
@@ -248,6 +250,12 @@ def merge_ledger_days(
         "report_month": through_date.strftime("%Y-%m"),
         "through_date": through_date.isoformat(),
         "generated_at": datetime.now(SHANGHAI).isoformat(timespec="seconds"),
+        "complete": not missing_dates,
+        "rate_limited": rate_limited,
+        "missing_dates": [
+            value.isoformat()
+            for value in (missing_dates or [])
+        ],
         "verification": {
             "verified_count": sum(row["verified_count"] for row in store_rows),
             "verified_amount_cents": sum(
@@ -290,6 +298,9 @@ class DouyinClient:
                 "DOUYIN_LEDGER_CACHE_DIR",
                 "output/douyin-ledger-daily",
             )
+        )
+        self.daily_cache_dir = Path(
+            os.environ.get("DOUYIN_DAILY_CACHE_DIR", "output")
         )
         self.current_day_cache_seconds = max(
             0,
@@ -570,11 +581,16 @@ class DouyinClient:
     def _ledger_cache_path(self, target_date: date) -> Path:
         return self.ledger_cache_dir / f"{target_date.isoformat()}.json"
 
-    def _load_ledger_day_cache(self, target_date: date) -> dict[str, Any] | None:
+    def _read_ledger_day_cache(self, target_date: date) -> dict[str, Any] | None:
         cache_path = self._ledger_cache_path(target_date)
         try:
-            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            return json.loads(cache_path.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
+
+    def _load_ledger_day_cache(self, target_date: date) -> dict[str, Any] | None:
+        cached = self._read_ledger_day_cache(target_date)
+        if not cached:
             return None
 
         today = datetime.now(SHANGHAI).date()
@@ -609,6 +625,36 @@ class DouyinClient:
         )
         temp_path.replace(cache_path)
 
+    def _daily_cache_path(self, target_date: date) -> Path:
+        return self.daily_cache_dir / f"douyin-daily-{target_date.isoformat()}.json"
+
+    def _load_daily_cache(self, target_date: date) -> dict[str, Any] | None:
+        try:
+            cached = json.loads(
+                self._daily_cache_path(target_date).read_text(encoding="utf-8")
+            )
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
+
+        if cached.get("report_date") != target_date.isoformat():
+            return None
+        cached.pop("monthly", None)
+        return cached
+
+    def _save_daily_cache(
+        self,
+        target_date: date,
+        summary: dict[str, Any],
+    ) -> None:
+        cache_path = self._daily_cache_path(target_date)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = cache_path.with_suffix(".tmp")
+        temp_path.write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temp_path.replace(cache_path)
+
     def ledger_day_summary(
         self,
         target_date: date,
@@ -626,25 +672,70 @@ class DouyinClient:
 
     def monthly_ledger_summary(self, through_date: date) -> dict[str, Any]:
         month_start = through_date.replace(day=1)
-        daily_summaries: list[dict[str, Any]] = []
+        target_dates: list[date] = []
         current = month_start
         while current <= through_date:
-            daily_summaries.append(self.ledger_day_summary(current))
+            target_dates.append(current)
             current += timedelta(days=1)
+
+        daily_summaries: list[dict[str, Any]] = []
+        rate_limited = False
+        for target_date in target_dates:
+            try:
+                daily_summaries.append(self.ledger_day_summary(target_date))
+            except DouyinAPIError as error:
+                if error.code != 2119003:
+                    raise
+                rate_limited = True
+                break
+
+        if rate_limited:
+            daily_summaries = []
+            for target_date in target_dates:
+                cached = self._read_ledger_day_cache(target_date)
+                if cached:
+                    daily_summaries.append(cached)
+
+        cached_dates = {
+            str(summary.get("report_date") or "")
+            for summary in daily_summaries
+        }
+        missing_dates = [
+            target_date
+            for target_date in target_dates
+            if target_date.isoformat() not in cached_dates
+        ]
 
         shop_names = {
             row["poi_id"]: row["store"]
             for row in self.query_shops()
         }
-        return merge_ledger_days(through_date, daily_summaries, shop_names)
+        return merge_ledger_days(
+            through_date,
+            daily_summaries,
+            shop_names,
+            missing_dates,
+            rate_limited,
+        )
 
     def daily_summary(self, target_date: date) -> dict[str, Any]:
+        cached = self._load_daily_cache(target_date)
+        if cached and target_date < datetime.now(SHANGHAI).date():
+            return cached
+
         period = date_range(target_date)
         orders = self.query_orders(period)
         verifications = self.query_verifications(period)
         ledger_records = self.query_ledger(target_date)
         self.ledger_day_summary(target_date, ledger_records)
-        return summarize_daily_data(target_date, orders, verifications, ledger_records)
+        summary = summarize_daily_data(
+            target_date,
+            orders,
+            verifications,
+            ledger_records,
+        )
+        self._save_daily_cache(target_date, summary)
+        return summary
 
     def report_summary(
         self,
