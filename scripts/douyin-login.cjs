@@ -30,6 +30,10 @@ async function waitForLogin(page) {
     console.log("DOUYIN_LOGIN_OK");
     return;
   }
+  await page.waitForFunction(() => {
+    const text = document.body?.innerText || "";
+    return text.includes("立即登录") || text.includes("登录抖音来客");
+  }, { timeout: 60000 });
 
   const existingLogin = await firstVisible(
     page.getByText("立即登录", { exact: true }),
