@@ -308,22 +308,25 @@ async function readLemeng(page) {
     timeout: 60000,
   });
 
-  const monthSelector = page.locator(
-    '.earth-select-selection-item[title="本月"]:visible',
-  );
-  if ((await monthSelector.count()) === 1) {
-    await monthSelector.click();
-    const monthOption = page.locator(
-      ".earth-select-item-option:visible",
-    ).filter({ hasText: /^本月$/ });
-    if ((await monthOption.count()) === 0) {
-      throw new Error("乐檬营业收款报表没有找到“本月”选项");
-    }
-    await monthOption.last().click();
+  const periodSelector = page.locator(
+    ".earth-select-selection-item:visible",
+  ).filter({ hasText: /^(今天|本月|上月)$/ });
+  if ((await periodSelector.count()) !== 1) {
+    throw new Error(
+      `乐檬营业收款报表日期周期控件匹配数 ${await periodSelector.count()}`,
+    );
   }
+  await periodSelector.click();
+  const monthOption = page.locator(
+    ".earth-select-item-option:visible",
+  ).filter({ hasText: /^本月$/ });
+  if ((await monthOption.count()) === 0) {
+    throw new Error("乐檬营业收款报表没有找到“本月”选项");
+  }
+  await monthOption.last().click();
 
   const queryButton = page.locator("button:visible").filter({
-    hasText: /^查询$/,
+    hasText: /^查\s*询$/,
   });
   if ((await queryButton.count()) !== 1) {
     throw new Error(`乐檬营业收款报表查询按钮匹配数 ${await queryButton.count()}`);
