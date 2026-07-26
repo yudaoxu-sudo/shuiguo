@@ -1,0 +1,55 @@
+{
+  "schema": "project_continuity_config.v1",
+  "project_id": "fruit-store-automation",
+  "name": "Fruit Store Report Automation",
+  "project_root": "/Users/xuyufan/Documents/New project",
+  "state_db_path": "~/.codex/state_5.sqlite",
+  "runtime_root": "~/Documents/Codex/runtime/project-continuity",
+  "registry_path": "~/Documents/Codex/agent/project-continuity-projects.json",
+  "context_files": [
+    {
+      "path": "/Users/xuyufan/Documents/Codex/projects/fruit-store-automation.md",
+      "role": "project_memory",
+      "required": true
+    },
+    {
+      "path": "/Users/xuyufan/Documents/shuiguo/docs/project-continuity-runbook.md",
+      "role": "operator_runbook",
+      "required": true
+    },
+    {
+      "path": "/Users/xuyufan/Documents/shuiguo/README.md",
+      "role": "source_readme",
+      "required": true
+    },
+    {
+      "path": "/Users/xuyufan/Documents/shuiguo/package.json",
+      "role": "entrypoints",
+      "required": true
+    },
+    {
+      "path": "/Users/xuyufan/Documents/shuiguo/deploy/crontab.example",
+      "role": "schedule",
+      "required": true
+    }
+  ],
+  "health_files": [
+    {
+      "path": "/Users/xuyufan/Documents/Codex/runtime/project-continuity/fruit-store-automation/evidence/server-health-latest.json",
+      "role": "production_runtime_health",
+      "required": true
+    }
+  ],
+  "thresholds": {
+    "log_bytes_warning": 52428800,
+    "log_bytes_rotate": 104857600,
+    "tokens_used_warning": 150000000,
+    "tokens_used_rotate": 300000000,
+    "compaction_count_warning": 6,
+    "compaction_count_rotate": 10,
+    "turn_count_warning": 120,
+    "turn_count_rotate": 200,
+    "notification_cooldown_seconds": 43200,
+    "checkpoint_cooldown_seconds": 86400
+  }
+}
