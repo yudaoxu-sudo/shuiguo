@@ -1,5 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 
 const {
   buildMarkdown,
@@ -11,6 +13,7 @@ const {
   buildLemengCollectionReport,
 } = require("../scripts/read-current-lemeng.cjs");
 const {
+  assertCompleteTablePage,
   buildDouyinBrowserSummary,
 } = require("../scripts/read-current-douyin-browser.cjs");
 const {
@@ -126,6 +129,82 @@ test("builds monthly Douyin totals from the finance summary without ledger pagin
     store: "未归属门店",
     merchant_due_cents: 1939,
   });
+});
+
+test("requires affirmative evidence that the webpage store table is fully read", () => {
+  assert.doesNotThrow(() => assertCompleteTablePage({
+    rowCount: 8,
+    paginationDetected: true,
+    totalCount: 8,
+    currentPage: 1,
+    pageCount: 1,
+    hasEnabledNext: false,
+  }, "抖音门店汇总"));
+
+  assert.doesNotThrow(() => assertCompleteTablePage({
+    rowCount: 8,
+    paginationDetected: true,
+    currentPage: 1,
+    pageCount: 1,
+    hasEnabledNext: false,
+  }, "抖音门店汇总"));
+
+  assert.throws(
+    () => assertCompleteTablePage({
+      rowCount: 8,
+      paginationDetected: false,
+    }, "抖音门店汇总"),
+    /没有读取到分页完整性信息/,
+  );
+  assert.throws(
+    () => assertCompleteTablePage({
+      rowCount: 8,
+      paginationDetected: true,
+      totalCount: 9,
+      currentPage: 1,
+      pageCount: 1,
+      hasEnabledNext: false,
+    }, "抖音门店汇总"),
+    /存在未读取分页/,
+  );
+  assert.throws(
+    () => assertCompleteTablePage({
+      rowCount: 8,
+      paginationDetected: true,
+      totalCount: 7,
+      currentPage: 1,
+      pageCount: 1,
+      hasEnabledNext: false,
+    }, "抖音门店汇总"),
+    /存在未读取分页/,
+  );
+  assert.throws(
+    () => assertCompleteTablePage({
+      rowCount: 8,
+      paginationDetected: true,
+      currentPage: 1,
+      pageCount: 2,
+      hasEnabledNext: true,
+    }, "抖音门店汇总"),
+    /存在未读取分页/,
+  );
+  assert.throws(
+    () => assertCompleteTablePage({
+      rowCount: 8,
+      paginationDetected: true,
+    }, "抖音门店汇总"),
+    /分页完整性信息不充分/,
+  );
+});
+
+test("documents the exact plus-or-minus one-cent store residual tolerance", () => {
+  const decision = fs.readFileSync(
+    path.resolve(__dirname, "../docs/douyin-source-decision-2026-07.md"),
+    "utf8",
+  );
+  assert.match(decision, /相差 ±1 分以内视为舍入容差/);
+  assert.match(decision, /总额高出超过 1 分记"未归属门店"/);
+  assert.match(decision, /门店合计高出超过 1 分报错/);
 });
 
 test("builds monthly Douyin totals with two aggregate API responses", () => {

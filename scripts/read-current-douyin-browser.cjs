@@ -22,6 +22,54 @@ function moneyToCents(value) {
   return Math.round(amount * 100);
 }
 
+function assertCompleteTablePage({
+  rowCount,
+  paginationDetected,
+  totalCount = null,
+  currentPage = null,
+  pageCount = null,
+  hasEnabledNext = null,
+}, label = "抖音汇总表") {
+  if (!paginationDetected) {
+    throw new Error(`${label}没有读取到分页完整性信息`);
+  }
+
+  const rows = Number(rowCount);
+  const total = Number(totalCount);
+  const current = Number(currentPage);
+  const pages = Number(pageCount);
+  const totalKnown = totalCount !== null
+    && totalCount !== ""
+    && Number.isInteger(total)
+    && total >= 0;
+  const pageKnown = pageCount !== null
+    && pageCount !== ""
+    && Number.isInteger(pages)
+    && pages > 0;
+  const currentKnown = currentPage !== null
+    && currentPage !== ""
+    && Number.isInteger(current)
+    && current > 0;
+
+  if (
+    hasEnabledNext === true
+    || (pageKnown && pages > 1)
+    || (currentKnown && current !== 1)
+    || (totalKnown && total !== rows)
+  ) {
+    throw new Error(`${label}存在未读取分页`);
+  }
+
+  const totalProvesComplete = totalKnown && total === rows;
+  const pageProvesComplete = pageKnown
+    && pages === 1
+    && (!currentKnown || current === 1)
+    && hasEnabledNext === false;
+  if (!totalProvesComplete && !pageProvesComplete) {
+    throw new Error(`${label}分页完整性信息不充分`);
+  }
+}
+
 function buildDouyinBrowserSummary({
   reportDate,
   merchantDue,
@@ -164,7 +212,11 @@ async function extractMerchantDue(page) {
   return value;
 }
 
-async function extractTable(page, requiredHeaders) {
+async function extractTable(
+  page,
+  requiredHeaders,
+  { requireCompletePage = false, label = "抖音汇总表" } = {},
+) {
   await page.waitForFunction((headers) => {
     const normalize = (value) => String(value || "").replace(/\s+/g, "");
     const headerTables = [...document.querySelectorAll("table")].filter(
@@ -218,13 +270,75 @@ async function extractTable(page, requiredHeaders) {
           return indexes.map((index) => cells[index]?.innerText.trim() || "");
         })
         .filter((row) => row.every(Boolean));
-      return { rows, visibleRowCount: rows.length };
+
+      let paginationRoot = null;
+      let scope = wrapper;
+      for (let depth = 0; scope && depth < 7; depth += 1) {
+        const candidates = [...scope.querySelectorAll(
+          '[class*="pagination"], [class*="Pagination"], [aria-label*="分页"]',
+        )].filter(visible);
+        if (candidates.length > 0) {
+          paginationRoot = candidates[0];
+          break;
+        }
+        scope = scope.parentElement;
+      }
+
+      if (!paginationRoot) {
+        return {
+          rows,
+          pagination: {
+            paginationDetected: false,
+            rowCount: rows.length,
+          },
+        };
+      }
+
+      const paginationText = paginationRoot.innerText?.replace(/\s+/g, " ").trim() || "";
+      const totalMatch = paginationText.match(/共\s*(\d+)\s*条/);
+      const fractionMatch = paginationText.match(/(\d+)\s*\/\s*(\d+)(?:\s*页)?/);
+      const activePage = paginationRoot.querySelector(
+        '[aria-current="page"], [class*="pagination-item-active"]',
+      );
+      const numericPages = [...paginationRoot.querySelectorAll("li, button, a")]
+        .filter(visible)
+        .map((element) => Number(element.textContent.trim()))
+        .filter((value) => Number.isInteger(value) && value > 0);
+      const nextControl = [...paginationRoot.querySelectorAll(
+        '[class*="pagination-next"], [aria-label*="下一页"], [title*="下一页"]',
+      )].find(visible);
+      const nextDisabled = nextControl
+        ? nextControl.disabled
+          || nextControl.getAttribute("aria-disabled") === "true"
+          || /disabled/.test(nextControl.className || "")
+        : null;
+
+      return {
+        rows,
+        pagination: {
+          paginationDetected: true,
+          rowCount: rows.length,
+          totalCount: totalMatch ? Number(totalMatch[1]) : null,
+          currentPage: fractionMatch
+            ? Number(fractionMatch[1])
+            : Number(activePage?.textContent.trim()) || null,
+          pageCount: fractionMatch
+            ? Number(fractionMatch[2])
+            : numericPages.length > 0
+              ? Math.max(...numericPages)
+              : null,
+          hasEnabledNext: nextControl ? !nextDisabled : null,
+        },
+      };
     }
     return null;
   }, requiredHeaders);
 
   if (!result || result.rows.length === 0) {
     throw new Error(`抖音汇总表没有读取到列：${requiredHeaders.join("、")}`);
+  }
+  if (requireCompletePage) {
+    assertCompleteTablePage(result.pagination, label);
   }
   return result.rows;
 }
@@ -272,7 +386,11 @@ async function readDouyinBrowser(context, monthThrough) {
       state: "visible",
       timeout: 30000,
     });
-    const rawStoreRows = await extractTable(page, ["门店", "商家应得(元)"]);
+    const rawStoreRows = await extractTable(
+      page,
+      ["门店", "商家应得(元)"],
+      { requireCompletePage: true, label: "抖音门店汇总" },
+    );
     const storeRows = rawStoreRows.map(([store, merchantAmount]) => ({
       store,
       merchantDue: merchantAmount,
@@ -331,6 +449,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  assertCompleteTablePage,
   buildDouyinBrowserSummary,
   moneyToCents,
   readDouyinBrowser,

@@ -4,8 +4,16 @@ const readline = require("readline/promises");
 const { chromium } = require("playwright");
 const { withLock } = require("./runtime-lock.cjs");
 const { loadEnv } = require("./send-dingtalk.cjs");
+const {
+  clearSmsCode,
+  createSmsRepairRequest,
+  smsCodeFilePath,
+  waitForSmsCode,
+} = require("./douyin-sms-repair.cjs");
 
 const financeUrl = "https://life.douyin.com/p/finance/v2/home";
+const smsTargetPath = "output/douyin-sms-repair-target.json";
+const smsTargetTtlMs = 5 * 60 * 1000;
 const safeDiagnosticKeys = new Set([
   "captcha",
   "code",
@@ -18,6 +26,41 @@ const safeDiagnosticKeys = new Set([
   "verify_method",
   "verify_type",
 ]);
+
+function listenerSmsRepairRequested({
+  argv = process.argv.slice(2),
+  env = process.env,
+} = {}) {
+  return argv.includes("--listener-sms")
+    || env.DOUYIN_SMS_REPAIR_MODE === "listener";
+}
+
+function loadFreshSmsRepairTarget({
+  filePath = path.resolve(smsTargetPath),
+  now = Date.now(),
+  ttlMs = smsTargetTtlMs,
+} = {}) {
+  try {
+    const target = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    const savedAt = Date.parse(target?.savedAt || "");
+    if (
+      !target?.conversationId
+      || !target?.senderStaffId
+      || !Number.isFinite(savedAt)
+      || savedAt > now
+      || now - savedAt > ttlMs
+    ) {
+      return null;
+    }
+    return {
+      conversationId: String(target.conversationId),
+      senderStaffId: String(target.senderStaffId),
+      savedAt: target.savedAt,
+    };
+  } catch {
+    return null;
+  }
+}
 
 function collectSafeDiagnosticFields(value, prefix = "", depth = 0, output = {}) {
   if (!value || typeof value !== "object" || depth > 5) return output;
@@ -42,21 +85,6 @@ async function readSafeResponseDetails(response) {
   } catch {
     return {};
   }
-}
-
-async function waitForSmsCodeFile(filePath) {
-  const deadline = Date.now() + Number(process.env.DOUYIN_SMS_WAIT_MS || 5 * 60 * 1000);
-  while (Date.now() < deadline) {
-    if (fs.existsSync(filePath)) {
-      const code = fs.readFileSync(filePath, "utf8").replace(/\s+/g, "");
-      if (/^\d{4,8}$/.test(code)) {
-        fs.rmSync(filePath, { force: true });
-        return code;
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-  throw new Error("等待抖音短信验证码超时");
 }
 
 async function firstVisible(locator) {
@@ -167,6 +195,16 @@ async function waitForLogin(page) {
     await phoneInput.fill(phone);
     await acceptAgreement(page);
 
+    const useListenerSms = listenerSmsRepairRequested();
+    const listenerTarget = useListenerSms ? loadFreshSmsRepairTarget() : null;
+    if (useListenerSms && !listenerTarget) {
+      throw new Error(
+        "没有可用的抖音短信接收上下文，请先在目标钉钉会话发送“准备抖音短信”",
+      );
+    }
+    const codeFile = useListenerSms ? smsCodeFilePath() : "";
+    if (useListenerSms) clearSmsCode(codeFile);
+
     const sendCode = await firstVisible(
       page.getByText("发送验证码", { exact: true }),
     );
@@ -174,10 +212,21 @@ async function waitForLogin(page) {
     await sendCode.click();
     console.log("DOUYIN_SMS_SENT");
 
-    const codeFile = process.env.DOUYIN_SMS_CODE_FILE;
-    const code = codeFile
-      ? await waitForSmsCodeFile(path.resolve(codeFile))
-      : (await terminal.question("短信验证码：")).trim();
+    let code;
+    if (useListenerSms) {
+      createSmsRepairRequest({
+        reason: "douyin-login",
+        conversationId: listenerTarget.conversationId,
+        senderStaffId: listenerTarget.senderStaffId,
+      });
+      console.log("DOUYIN_SMS_REPAIR_REQUESTED");
+      code = await waitForSmsCode({
+        filePath: codeFile,
+        discardExisting: false,
+      });
+    } else {
+      code = (await terminal.question("短信验证码：")).trim();
+    }
     if (!/^\d{4,8}$/.test(code)) throw new Error("短信验证码格式不正确");
     await codeInput.fill(code);
 
@@ -302,3 +351,8 @@ if (require.main === module) {
     process.exit(1);
   });
 }
+
+module.exports = {
+  listenerSmsRepairRequested,
+  loadFreshSmsRepairTarget,
+};

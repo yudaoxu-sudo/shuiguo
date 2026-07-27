@@ -6,12 +6,23 @@ const { DWClient, TOPIC_ROBOT } = require("dingtalk-stream");
 const { acquireLock } = require("./runtime-lock.cjs");
 const { gotoZhimadi, isZhimadiAuthenticated } = require("./zhimadi-navigation.cjs");
 const { sendDingTalkImage, sendDingTalkMarkdown } = require("./send-dingtalk.cjs");
+const {
+  clearSmsCode,
+  createSmsSession,
+  handleSmsCodeReply,
+  sendSmsRepairNotice,
+  smsRequestFilePath,
+  writeJsonAtomic,
+  writeSmsCode,
+} = require("./douyin-sms-repair.cjs");
 
 const heartbeatPath = path.resolve("output/listener-heartbeat.json");
 const commandStatePath = path.resolve("output/listener-command-state.json");
 const groupContextPath = path.resolve("output/listener-group-context.json");
 const repairRequestPath = path.resolve("output/zhimadi-login-repair-request.json");
 const repairStatePath = path.resolve("output/zhimadi-login-repair-state.json");
+const douyinSmsStatePath = path.resolve("output/douyin-sms-repair-state.json");
+const douyinSmsTargetPath = path.resolve("output/douyin-sms-repair-target.json");
 const duplicateWindowMs = 3 * 60 * 1000;
 const loginSessionTtlMs = 5 * 60 * 1000;
 const captchaSelector = "#verifyCode";
@@ -106,6 +117,197 @@ function loadGroupContext() {
   const context = readJson(groupContextPath);
   if (!context?.conversationId || !context?.robotCode) return null;
   return context;
+}
+
+function saveDouyinSmsTarget(
+  message,
+  text,
+  {
+    filePath = douyinSmsTargetPath,
+    now = Date.now(),
+  } = {},
+) {
+  if (String(text || "").trim() !== "准备抖音短信") return false;
+  if (!message?.conversationId || !message?.senderStaffId) return false;
+  writeJsonAtomic(filePath, {
+    conversationId: String(message.conversationId),
+    senderStaffId: String(message.senderStaffId),
+    sessionWebhook: String(message.sessionWebhook || ""),
+    savedAt: new Date(now).toISOString(),
+  });
+  return true;
+}
+
+function loadDouyinSmsTarget(filePath = douyinSmsTargetPath) {
+  const target = readJson(filePath);
+  if (!target?.conversationId || !target?.senderStaffId || !target?.savedAt) {
+    return null;
+  }
+  return target;
+}
+
+function createDouyinSmsFlow({
+  loadState = () => readJson(douyinSmsStatePath) || {},
+  persistState = (state) => writeJsonAtomic(douyinSmsStatePath, state),
+  loadRequest = () => readJson(smsRequestFilePath()),
+  loadContext = loadDouyinSmsTarget,
+  deliver = (code) => writeSmsCode(code),
+  clearDelivery = () => clearSmsCode(),
+  sessionSend,
+  webhookSend,
+  now = Date.now,
+  requestTtlMs = 5 * 60 * 1000,
+  contextTtlMs = 5 * 60 * 1000,
+  promptClaimTtlMs = 60 * 1000,
+} = {}) {
+  async function handleRepairRequest() {
+    const request = loadRequest();
+    if (!request?.requestedAt) return { outcome: "no-request" };
+
+    const currentNow = now();
+    const requestedAt = Date.parse(request.requestedAt);
+    if (
+      !Number.isFinite(requestedAt)
+      || requestedAt > currentNow
+      || currentNow - requestedAt > requestTtlMs
+    ) {
+      return { outcome: "stale-request" };
+    }
+
+    const state = loadState();
+    const requestId = request.requestId || request.requestedAt;
+    if (
+      state.handledRequestId === requestId
+      || (
+        !request.requestId
+        && state.handledRequestAt === request.requestedAt
+      )
+    ) {
+      return { outcome: "already-handled" };
+    }
+    const promptingStartedAt = Date.parse(
+      state.promptingStartedAt || state.promptingRequestAt || "",
+    );
+    const promptClaimIsLive = Number.isFinite(promptingStartedAt)
+      && promptingStartedAt <= currentNow + promptClaimTtlMs
+      && currentNow - promptingStartedAt <= promptClaimTtlMs;
+    if (
+      state.promptingRequestId === requestId
+      && state.promptStatus !== "failed"
+      && promptClaimIsLive
+    ) {
+      return { outcome: "prompt-in-progress" };
+    }
+
+    const context = loadContext() || {};
+    const requestConversationId = String(request.conversationId || "");
+    const requestSenderStaffId = String(request.senderStaffId || "");
+    const requestHasConversation = Boolean(requestConversationId);
+    const requestHasSender = Boolean(requestSenderStaffId);
+    if (requestHasConversation !== requestHasSender) {
+      return { outcome: "invalid-binding" };
+    }
+
+    const requestIsBound = requestHasConversation && requestHasSender;
+    const contextConversationId = String(context.conversationId || "");
+    const contextSenderStaffId = String(context.senderStaffId || "");
+    const contextSavedAt = Date.parse(context.savedAt || "");
+    const contextIsFresh = Number.isFinite(contextSavedAt)
+      && contextSavedAt <= currentNow
+      && currentNow - contextSavedAt <= contextTtlMs;
+
+    if (
+      !requestIsBound
+      && (
+        !contextConversationId
+        || !contextSenderStaffId
+        || !contextIsFresh
+      )
+    ) {
+      return { outcome: "missing-context" };
+    }
+    const conversationId = requestIsBound
+      ? requestConversationId
+      : contextConversationId;
+    const senderStaffId = requestIsBound
+      ? requestSenderStaffId
+      : contextSenderStaffId;
+    const contextMatchesBinding = contextConversationId === conversationId
+      && contextSenderStaffId === senderStaffId;
+    const noticeContext = contextMatchesBinding
+      ? context
+      : { conversationId, senderStaffId };
+
+    // 上一轮没被 douyin-login 消费的旧码要先清掉，否则新一轮登录会立刻吞掉旧码。
+    clearDelivery();
+    const session = createSmsSession({
+      now: currentNow,
+      reason: request.reason || "",
+      conversationId,
+      senderStaffId,
+    });
+    const promptingState = {
+      promptingRequestId: requestId,
+      promptingRequestAt: request.requestedAt,
+      promptingStartedAt: new Date(currentNow).toISOString(),
+      session,
+      // 去重记录跨会话保留：紧接着的新会话不能把钉钉重投递的旧回复当成新码。
+      seenReplies: state.seenReplies || [],
+    };
+    persistState(promptingState);
+
+    try {
+      const channel = await sendSmsRepairNotice({
+        message: null,
+        groupContext: noticeContext,
+        content: "抖音来客登录需要手机短信验证码，回复：短信码123456",
+        sessionSend,
+        webhookSend,
+      });
+      persistState({
+        ...promptingState,
+        handledRequestId: requestId,
+        handledRequestAt: request.requestedAt,
+        promptingRequestId: null,
+        promptingRequestAt: null,
+        promptingStartedAt: null,
+      });
+      return { outcome: "prompted", channel, session };
+    } catch (error) {
+      persistState({
+        ...promptingState,
+        promptStatus: "failed",
+        lastPromptError: String(error.message || error).slice(0, 300),
+      });
+      return {
+        outcome: "prompt-failed",
+        error: error.message,
+        session,
+      };
+    }
+  }
+
+  async function handleMessage(message, text) {
+    const state = loadState();
+    return handleSmsCodeReply({
+      session: state.session,
+      message,
+      text,
+      now: now(),
+      seenReplies: state.seenReplies,
+      persist: ({ session, seenReplies }) => persistState({ ...state, session, seenReplies }),
+      deliver,
+      notify: (content) => sendSmsRepairNotice({
+        message,
+        groupContext: loadContext(),
+        content,
+        sessionSend,
+        webhookSend,
+      }),
+    });
+  }
+
+  return { handleRepairRequest, handleMessage };
 }
 
 function rememberCommand(key) {
@@ -551,6 +753,17 @@ async function main() {
     clientSecret: process.env.DINGTALK_CLIENT_SECRET,
   });
 
+  const douyinSmsFlow = createDouyinSmsFlow({
+    sessionSend: (sessionWebhook, senderStaffId, content) => (
+      sendSessionText(client, sessionWebhook, senderStaffId, content)
+    ),
+    webhookSend: (content) => sendDingTalkMarkdown(
+      "抖音来客登录修复",
+      `### 抖音来客登录修复\n\n${content}`,
+      { alert: true },
+    ),
+  });
+
   async function startZhimadiCaptchaFlow(message, options = {}) {
     const afterLoginReport = options.afterLoginReport === true;
     const autoReport = options.autoReport ?? afterLoginReport;
@@ -660,6 +873,15 @@ async function main() {
     handleAutoRepairRequest().catch((error) => {
       console.error(error.stack || error.message);
     });
+    douyinSmsFlow.handleRepairRequest()
+      .then((result) => {
+        if (result.outcome === "prompt-failed") {
+          console.warn(`抖音短信修复提示发送失败：${result.error}`);
+        }
+      })
+      .catch((error) => {
+        console.error(error.stack || error.message);
+      });
   }, Number(process.env.AUTO_REPAIR_POLL_MS || 15000)).unref();
 
   client.registerCallbackListener(TOPIC_ROBOT, async (res) => {
@@ -702,6 +924,24 @@ async function main() {
         running = false;
         await sendSessionText(client, message.sessionWebhook, message.senderStaffId, `验证码失败：${error.message}`);
         console.error(error.stack || error.message);
+      }
+      return;
+    }
+
+    if (saveDouyinSmsTarget(message, text)) {
+      await sendSessionText(
+        client,
+        message.sessionWebhook,
+        message.senderStaffId,
+        "抖音短信接收上下文已准备，请在 5 分钟内运行修复入口。",
+      );
+      return;
+    }
+
+    const smsReply = await douyinSmsFlow.handleMessage(message, text);
+    if (smsReply.handled) {
+      if (smsReply.outcome.endsWith("-failed")) {
+        console.warn(`抖音短信修复回复处理失败：${smsReply.error || smsReply.outcome}`);
       }
       return;
     }
@@ -783,3 +1023,9 @@ if (require.main === module) {
     process.exit(1);
   });
 }
+
+module.exports = {
+  createDouyinSmsFlow,
+  loadDouyinSmsTarget,
+  saveDouyinSmsTarget,
+};
