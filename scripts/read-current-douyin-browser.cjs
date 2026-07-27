@@ -275,7 +275,7 @@ async function extractTable(
       let scope = wrapper;
       for (let depth = 0; scope && depth < 7; depth += 1) {
         const candidates = [...scope.querySelectorAll(
-          '[class*="pagination"], [class*="Pagination"], [aria-label*="分页"]',
+          '[class*="pagination"], [class*="Pagination"], [class*="pager"], [class*="Pager"], [aria-label*="分页"]',
         )].filter(visible);
         if (candidates.length > 0) {
           paginationRoot = candidates[0];
@@ -298,19 +298,25 @@ async function extractTable(
       const totalMatch = paginationText.match(/共\s*(\d+)\s*条/);
       const fractionMatch = paginationText.match(/(\d+)\s*\/\s*(\d+)(?:\s*页)?/);
       const activePage = paginationRoot.querySelector(
-        '[aria-current="page"], [class*="pagination-item-active"]',
+        '[aria-current="page"], [class*="pagination-item-active"], [class*="pager-item-active"], [class*="pager-item-checked"]',
       );
       const numericPages = [...paginationRoot.querySelectorAll("li, button, a")]
         .filter(visible)
         .map((element) => Number(element.textContent.trim()))
         .filter((value) => Number.isInteger(value) && value > 0);
-      const nextControl = [...paginationRoot.querySelectorAll(
+      let nextControl = [...paginationRoot.querySelectorAll(
         '[class*="pagination-next"], [aria-label*="下一页"], [title*="下一页"]',
       )].find(visible);
+      if (!nextControl && /pager/i.test(String(paginationRoot.className || ""))) {
+        const navigationItems = [...paginationRoot.querySelectorAll("li, button, a")]
+          .filter(visible)
+          .filter((element) => !/^\d+$/.test(element.textContent.trim()));
+        nextControl = navigationItems[navigationItems.length - 1] || null;
+      }
       const nextDisabled = nextControl
         ? nextControl.disabled
           || nextControl.getAttribute("aria-disabled") === "true"
-          || /disabled/.test(nextControl.className || "")
+          || /disabled/i.test(String(nextControl.className || ""))
         : null;
 
       return {

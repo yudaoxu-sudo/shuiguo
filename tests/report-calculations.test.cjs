@@ -197,6 +197,16 @@ test("requires affirmative evidence that the webpage store table is fully read",
   );
 });
 
+test("keeps the production Byted pager selectors and disabled-next fallback", () => {
+  const source = fs.readFileSync(
+    path.resolve(__dirname, "../scripts/read-current-douyin-browser.cjs"),
+    "utf8",
+  );
+  assert.match(source, /\[class\*="pager"\]/);
+  assert.match(source, /\[class\*="pager-item-checked"\]/);
+  assert.match(source, /navigationItems\[navigationItems\.length - 1\]/);
+});
+
 test("documents the exact plus-or-minus one-cent store residual tolerance", () => {
   const decision = fs.readFileSync(
     path.resolve(__dirname, "../docs/douyin-source-decision-2026-07.md"),
