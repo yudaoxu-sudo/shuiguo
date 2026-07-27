@@ -204,6 +204,7 @@ test("keeps the production Byted pager selectors and disabled-next fallback", ()
   );
   assert.match(source, /\[class\*="pager"\]/);
   assert.match(source, /\[class\*="pager-item-checked"\]/);
+  assert.match(source, /paginationControlsRoot/);
   assert.match(source, /navigationItems\[navigationItems\.length - 1\]/);
 });
 

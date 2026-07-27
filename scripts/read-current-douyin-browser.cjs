@@ -297,18 +297,27 @@ async function extractTable(
       const paginationText = paginationRoot.innerText?.replace(/\s+/g, " ").trim() || "";
       const totalMatch = paginationText.match(/共\s*(\d+)\s*条/);
       const fractionMatch = paginationText.match(/(\d+)\s*\/\s*(\d+)(?:\s*页)?/);
-      const activePage = paginationRoot.querySelector(
+      const paginationControlsRoot = paginationRoot.matches(
+        '[class*="pager"], [class*="Pager"]',
+      )
+        ? paginationRoot
+        : paginationRoot.querySelector('[class*="pager"], [class*="Pager"]')
+          || paginationRoot;
+      const activePage = paginationControlsRoot.querySelector(
         '[aria-current="page"], [class*="pagination-item-active"], [class*="pager-item-active"], [class*="pager-item-checked"]',
       );
-      const numericPages = [...paginationRoot.querySelectorAll("li, button, a")]
+      const numericPages = [...paginationControlsRoot.querySelectorAll("li, button, a")]
         .filter(visible)
         .map((element) => Number(element.textContent.trim()))
         .filter((value) => Number.isInteger(value) && value > 0);
-      let nextControl = [...paginationRoot.querySelectorAll(
+      let nextControl = [...paginationControlsRoot.querySelectorAll(
         '[class*="pagination-next"], [aria-label*="下一页"], [title*="下一页"]',
       )].find(visible);
-      if (!nextControl && /pager/i.test(String(paginationRoot.className || ""))) {
-        const navigationItems = [...paginationRoot.querySelectorAll("li, button, a")]
+      if (
+        !nextControl
+        && /pager/i.test(String(paginationControlsRoot.className || ""))
+      ) {
+        const navigationItems = [...paginationControlsRoot.querySelectorAll("li, button, a")]
           .filter(visible)
           .filter((element) => !/^\d+$/.test(element.textContent.trim()));
         nextControl = navigationItems[navigationItems.length - 1] || null;
