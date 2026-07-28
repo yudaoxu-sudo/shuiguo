@@ -219,11 +219,18 @@ test("exports a self-contained verified bundle and detects content tampering", (
     assert.equal(fs.statSync(exportPath).mode & 0o777, 0o444);
     const verified = spawnSync(
       process.execPath,
-      [path.resolve(__dirname, "../scripts/report-history.cjs"), "verify-export", exportPath],
+      [path.resolve(__dirname, "../scripts/report-history.cjs"), "verify-export", "--", exportPath],
       { encoding: "utf8" },
     );
     assert.equal(verified.status, 0, verified.stderr);
     assert.match(verified.stdout, /备份校验通过/);
+    const shown = spawnSync(
+      process.execPath,
+      [path.resolve(__dirname, "../scripts/report-history.cjs"), "show", "--", "2026-07"],
+      { cwd: harness.dir, encoding: "utf8" },
+    );
+    assert.equal(shown.status, 0, shown.stderr);
+    assert.match(shown.stdout, /2026-07-28/);
 
     bundle.archives[0].files[0].contentBase64 = Buffer.from("tampered").toString("base64");
     assert.throws(() => verifyExportBundle(bundle), /校验失败/);

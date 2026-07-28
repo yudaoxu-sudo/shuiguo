@@ -435,7 +435,10 @@ async function handleHistoryCommand({
 }
 
 function main(argv = process.argv.slice(2)) {
-  const [command, month, destination] = argv;
+  const [command, ...rawArguments] = argv;
+  const [month, destination] = rawArguments[0] === "--"
+    ? rawArguments.slice(1)
+    : rawArguments;
   if (command === "archive-existing") {
     const archives = archiveExistingReports();
     console.log(`已归档 ${archives.length} 份历史报表`);
