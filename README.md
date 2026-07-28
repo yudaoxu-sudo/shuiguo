@@ -68,6 +68,29 @@ pnpm listen
 
 监听脚本收到后会运行月报脚本，并把结果推送到配置的钉钉群。
 
+每天生成成功的报表及其芝麻地、乐檬、抖音快照会按内容摘要保存到
+`output/report-history/YYYY-MM/`。归档文件只读；同一份内容重复执行会复用
+既有归档，内容变化会生成新的不可变版本。查询已归档月份时发送：
+
+```text
+@水果店月报 报表 2026-07
+```
+
+月份必须使用 `YYYY-MM`。查询只读取并校验归档，不会重新登录、抓取或发送新报表。
+
+首次升级可把 `output/` 中已有的日报纳入归档，并导出一份可复制到其他机器的
+自校验离线备份：
+
+```bash
+pnpm report:history:archive
+pnpm report:history:show -- 2026-07
+pnpm report:history:export -- 2026-07 /path/to/offsite-backup
+pnpm report:history:verify -- /path/to/offsite-backup/fruit-report-history-2026-07-....json
+```
+
+导出命令生成只读 JSON 备份包，包含归档清单、文件内容和整体摘要。目标目录应位于
+服务器之外的备份盘或由运维同步到异机存储。
+
 ## 服务器定时
 
 服务器跑通后，加 cron：

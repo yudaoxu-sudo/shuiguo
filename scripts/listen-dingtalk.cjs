@@ -7,6 +7,10 @@ const { acquireLock } = require("./runtime-lock.cjs");
 const { gotoZhimadi, isZhimadiAuthenticated } = require("./zhimadi-navigation.cjs");
 const { sendDingTalkImage, sendDingTalkMarkdown } = require("./send-dingtalk.cjs");
 const {
+  handleHistoryCommand,
+  parseHistoryCommand,
+} = require("./report-history.cjs");
+const {
   clearSmsCode,
   createSmsSession,
   handleSmsCodeReply,
@@ -942,6 +946,40 @@ async function main() {
     if (smsReply.handled) {
       if (smsReply.outcome.endsWith("-failed")) {
         console.warn(`抖音短信修复回复处理失败：${smsReply.error || smsReply.outcome}`);
+      }
+      return;
+    }
+
+    let historyMonth = null;
+    try {
+      historyMonth = parseHistoryCommand(text);
+    } catch {
+      await sendSessionText(
+        client,
+        message.sessionWebhook,
+        message.senderStaffId,
+        "历史报表命令格式：报表 YYYY-MM",
+      );
+      return;
+    }
+    if (historyMonth) {
+      const key = commandKey(message, text);
+      if (!rememberCommand(key)) {
+        console.log(`[${new Date().toISOString()}] duplicate history command ignored`);
+        return;
+      }
+      const result = await handleHistoryCommand({
+        text,
+        outputDir: path.resolve("output"),
+        reply: (content) => sendSessionText(
+          client,
+          message.sessionWebhook,
+          message.senderStaffId,
+          content,
+        ),
+      });
+      if (result.error) {
+        console.warn(`历史报表读取失败：${result.error.message}`);
       }
       return;
     }

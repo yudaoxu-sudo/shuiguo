@@ -5,6 +5,7 @@ const { chromium } = require("playwright");
 const { parseZhimadiText, buildMarkdown } = require("./read-current-zhimadi.cjs");
 const { buildLemengCollectionReport } = require("./read-current-lemeng.cjs");
 const { readDouyin } = require("./read-current-douyin.cjs");
+const { archiveMonthlyReport } = require("./report-history.cjs");
 const { withLock } = require("./runtime-lock.cjs");
 const { gotoZhimadi } = require("./zhimadi-navigation.cjs");
 
@@ -533,7 +534,13 @@ async function runReportOnce(outputDir) {
         );
       }
       const markdown = buildMarkdown(dateText, zhimadi, lemeng, douyin);
-      fs.writeFileSync(path.join(outputDir, `monthly-report-${dateText}${suffix}.md`), markdown);
+      const reportPath = path.join(outputDir, `monthly-report-${dateText}${suffix}.md`);
+      fs.writeFileSync(reportPath, markdown);
+      archiveMonthlyReport({
+        outputDir,
+        dateText,
+        suffix: outputSuffix,
+      });
       await sendDingTalk(markdown);
     } finally {
       await context.close();
