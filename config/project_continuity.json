@@ -2,7 +2,10 @@
   "schema": "project_continuity_config.v1",
   "project_id": "fruit-store-automation",
   "name": "Fruit Store Report Automation",
-  "project_root": "/Users/xuyufan/Documents/New project",
+  "project_root": "/Users/xuyufan/Documents/shuiguo",
+  "thread_roots": [
+    "/Users/xuyufan/Documents/New project"
+  ],
   "state_db_path": "~/.codex/state_5.sqlite",
   "runtime_root": "~/Documents/Codex/runtime/project-continuity",
   "registry_path": "~/Documents/Codex/agent/project-continuity-projects.json",

@@ -2,17 +2,20 @@
 
 ## Boundaries
 
-- Active Codex conversation workspace: `/Users/xuyufan/Documents/New project`
+- Active Codex conversation workspace: `/Users/xuyufan/Documents/shuiguo`
 - Canonical source repository: `/Users/xuyufan/Documents/shuiguo`
+- Legacy conversation workspace alias: `/Users/xuyufan/Documents/New project`
 - Git remote: `git@github.com:yudaoxu-sudo/shuiguo.git`
 - Production deployment: user `ubuntu`, host `43.134.121.205`
 - Production path: `/opt/fruit-store-report-bot`
 - SSH identity path: `~/.ssh/shuiguo_server_ed25519`
 - Project memory: `/Users/xuyufan/Documents/Codex/projects/fruit-store-automation.md`
 
-The continuity configuration uses the active conversation workspace as
-`project_root` so the continuity CLI can measure this original task. Source
-changes and Git verification must always use the canonical repository above.
+The continuity configuration uses the canonical source repository as
+`project_root`, so thread selection, checkpoints, resume packets, and Git
+verification resolve against the same repository. `thread_roots` retains the
+legacy workspace only for matching its existing unarchived tasks; it is never
+used as the checkpoint or Git root.
 
 ## Recovery
 
