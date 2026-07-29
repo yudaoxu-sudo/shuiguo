@@ -158,6 +158,37 @@ function fileHash(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
+function recordDualReportArtifactState({
+  previous,
+  date,
+  comparison,
+  apiMarkdown,
+  browserMarkdown,
+  previewOnly,
+  recordedAt = new Date(),
+  filePath = statePath,
+}) {
+  const recordedAtText = recordedAt.toISOString();
+  const state = previous?.date === date
+    ? { ...previous }
+    : { date, createdAt: recordedAtText };
+  state.comparison = comparison;
+  state.artifacts = {
+    mode: previewOnly ? "preview" : "send_attempt",
+    recordedAt: recordedAtText,
+    api: {
+      file: `dual-report-${date}-api.md`,
+      sha256: fileHash(apiMarkdown),
+    },
+    browser: {
+      file: `dual-report-${date}-browser.md`,
+      sha256: fileHash(browserMarkdown),
+    },
+  };
+  writeJson(filePath, state);
+  return state;
+}
+
 async function main() {
   loadEnv();
   const date = todayText();
@@ -221,15 +252,18 @@ async function main() {
     path.join(outputDir, `dual-report-${date}-browser.md`),
     browserMarkdown,
   );
+  const state = recordDualReportArtifactState({
+    previous,
+    date,
+    comparison,
+    apiMarkdown,
+    browserMarkdown,
+    previewOnly,
+  });
   if (previewOnly) {
     console.log(`douyin-dual-report-preview: ${date}; exact=${comparison.exact}`);
     return;
   }
-
-  const state = previous?.date === date
-    ? previous
-    : { date, createdAt: new Date().toISOString() };
-  state.comparison = comparison;
 
   if (!state.api?.sentAt) {
     const result = await sendDingTalkMarkdown(
@@ -271,4 +305,5 @@ module.exports = {
   compareDouyinSources,
   comparisonText,
   labelMarkdown,
+  recordDualReportArtifactState,
 };

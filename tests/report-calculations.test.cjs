@@ -1,6 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const {
@@ -23,6 +25,7 @@ const {
 const {
   compareDouyinSources,
   comparisonText,
+  recordDualReportArtifactState,
 } = require("../scripts/send-dual-douyin-report.cjs");
 
 test("uses Douyin received amounts directly and charges only Lemeng 0.3%", () => {
@@ -326,6 +329,83 @@ test("compares the aggregate API and webpage Douyin summaries", () => {
   assert.equal(different.store_differences.length, 1);
   assert.equal(different.read_gap_seconds, 19);
   assert.match(comparisonText(different), /相隔 19 秒/);
+});
+
+test("no-send dual preview refreshes artifact evidence without rewriting send proof", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fruit-dual-state-"));
+  const stateFile = path.join(tempDir, "douyin-dual-report-state.json");
+  const previous = {
+    date: "2026-07-25",
+    comparison: { exact: false },
+    api: {
+      sentAt: "2026-07-25T01:00:00.000Z",
+      sha256: "sent-api-hash",
+    },
+    browser: {
+      sentAt: "2026-07-25T01:00:01.000Z",
+      sha256: "sent-browser-hash",
+    },
+  };
+  const comparison = {
+    exact: true,
+    actual_difference_cents: 0,
+    expected_difference_cents: 0,
+    total_difference_cents: 0,
+    store_differences: [],
+    read_gap_seconds: 23,
+  };
+  const apiMarkdown = "current api report";
+  const browserMarkdown = "current browser report";
+
+  try {
+    const state = recordDualReportArtifactState({
+      previous,
+      date: "2026-07-29",
+      comparison,
+      apiMarkdown,
+      browserMarkdown,
+      previewOnly: true,
+      recordedAt: new Date("2026-07-29T04:21:24.000Z"),
+      filePath: stateFile,
+    });
+    const persisted = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+
+    assert.deepEqual(persisted, state);
+    assert.equal(state.date, "2026-07-29");
+    assert.deepEqual(state.comparison, comparison);
+    assert.equal(state.artifacts.mode, "preview");
+    assert.equal(state.artifacts.recordedAt, "2026-07-29T04:21:24.000Z");
+    assert.equal(
+      state.artifacts.api.sha256,
+      crypto.createHash("sha256").update(apiMarkdown).digest("hex"),
+    );
+    assert.equal(
+      state.artifacts.browser.sha256,
+      crypto.createHash("sha256").update(browserMarkdown).digest("hex"),
+    );
+    assert.equal(state.api, undefined);
+    assert.equal(state.browser, undefined);
+
+    const sentProof = {
+      ...state,
+      api: previous.api,
+      browser: previous.browser,
+    };
+    const refreshed = recordDualReportArtifactState({
+      previous: sentProof,
+      date: "2026-07-29",
+      comparison,
+      apiMarkdown: `${apiMarkdown} refreshed`,
+      browserMarkdown: `${browserMarkdown} refreshed`,
+      previewOnly: true,
+      recordedAt: new Date("2026-07-29T05:21:24.000Z"),
+      filePath: stateFile,
+    });
+    assert.deepEqual(refreshed.api, sentProof.api);
+    assert.deepEqual(refreshed.browser, sentProof.browser);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("withholds combined revenue and profit when the Douyin month is incomplete", () => {
