@@ -8,6 +8,7 @@ const { readDouyin } = require("./read-current-douyin.cjs");
 const { archiveMonthlyReport } = require("./report-history.cjs");
 const { withLock } = require("./runtime-lock.cjs");
 const { gotoZhimadi } = require("./zhimadi-navigation.cjs");
+const { writeHealthFailure } = require("./healthcheck-error.cjs");
 
 const repairRequestPath = path.resolve("output/zhimadi-login-repair-request.json");
 const repairStatePath = path.resolve("output/zhimadi-login-repair-state.json");
@@ -148,6 +149,9 @@ async function repairZhimadiLogin() {
     requestedAt,
     reason: "report-login-expired",
     afterLoginReport: !previewOnly,
+    ...(process.env.ZHIMADI_REPAIR_FAILURE_ALERT_OWNER
+      ? { failureAlertOwner: process.env.ZHIMADI_REPAIR_FAILURE_ALERT_OWNER }
+      : {}),
   });
   console.warn("检测到芝麻地登录态失效，正在触发自动登录修复");
   return waitForZhimadiRepair(requestedAt);
@@ -574,6 +578,7 @@ if (require.main === module) {
       await sendDingTalk(message, { alert: true }).catch(() => {});
     }
     console.error(error.stack || error.message);
+    writeHealthFailure(error);
     process.exit(error.code === "ZHIMADI_CAPTCHA_SENT" ? 2 : 1);
   });
 }

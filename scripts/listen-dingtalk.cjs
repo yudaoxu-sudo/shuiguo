@@ -27,6 +27,10 @@ const repairRequestPath = path.resolve("output/zhimadi-login-repair-request.json
 const repairStatePath = path.resolve("output/zhimadi-login-repair-state.json");
 const douyinSmsStatePath = path.resolve("output/douyin-sms-repair-state.json");
 const douyinSmsTargetPath = path.resolve("output/douyin-sms-repair-target.json");
+const deferredRepairAlertOwners = new Set([
+  "report-healthcheck",
+  "login-healthcheck",
+]);
 const duplicateWindowMs = 3 * 60 * 1000;
 const loginSessionTtlMs = 5 * 60 * 1000;
 const captchaSelector = "#verifyCode";
@@ -53,6 +57,10 @@ function writeHeartbeat(status = "running") {
     pid: process.pid,
     updatedAt: new Date().toISOString(),
   }, null, 2));
+}
+
+function shouldSendZhimadiRepairFailureAlert(request) {
+  return !deferredRepairAlertOwners.has(request?.failureAlertOwner);
 }
 
 function chromeExecutablePath() {
@@ -863,13 +871,17 @@ async function main() {
         handledAt: new Date().toISOString(),
         error: error.message,
       });
-      await sendDingTalkMarkdown(
-        "水果店登录修复失败",
-        `### 水果店登录修复失败\n\n${error.message}`,
-        { alert: true },
-      ).catch((sendError) => {
-        console.warn(`自动修复失败通知发送失败：${sendError.message}`);
-      });
+      if (shouldSendZhimadiRepairFailureAlert(request)) {
+        await sendDingTalkMarkdown(
+          "水果店登录修复失败",
+          `### 水果店登录修复失败\n\n${error.message}`,
+          { alert: true },
+        ).catch((sendError) => {
+          console.warn(`自动修复失败通知发送失败：${sendError.message}`);
+        });
+      } else {
+        console.warn("自动修复失败通知由健康检查统一处理");
+      }
     }
   }
 
@@ -1066,4 +1078,5 @@ module.exports = {
   createDouyinSmsFlow,
   loadDouyinSmsTarget,
   saveDouyinSmsTarget,
+  shouldSendZhimadiRepairFailureAlert,
 };

@@ -1,32 +1,37 @@
 const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
-const { loadEnv, sendDingTalkMarkdown } = require("./send-dingtalk.cjs");
+const {
+  checkReportHealth,
+  readJson,
+  runNodePreview,
+  writeJson,
+} = require("./check-report-health.cjs");
+const {
+  claimHealthAlert,
+  getHealthAlertState,
+  isSharedHealthProblem,
+  resolveHealthAlert,
+} = require("./health-alert-claim.cjs");
+const {
+  finalHealthFailureMessage,
+  writeHealthFailure,
+} = require("./healthcheck-error.cjs");
+const { loadEnv } = require("./send-dingtalk.cjs");
 const { withLock } = require("./runtime-lock.cjs");
 const { gotoZhimadi, isZhimadiAuthenticated } = require("./zhimadi-navigation.cjs");
 
 const statePath = path.resolve("output/login-health-state.json");
 const repairRequestPath = path.resolve("output/zhimadi-login-repair-request.json");
-const alertCooldownMs = Number(process.env.LOGIN_ALERT_COOLDOWN_MS || 6 * 60 * 60 * 1000);
+const repairStatePath = path.resolve("output/zhimadi-login-repair-state.json");
+const defaultRecoveryWindowMs = 20 * 60 * 1000;
+const defaultRetryIntervalMs = 60 * 1000;
+const defaultPreviewTimeoutMs = 10 * 60 * 1000;
+const defaultRepairRetryMs = 3 * 60 * 1000;
 
-function readJson(filePath) {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch {
-    return null;
-  }
-}
-
-function writeJson(filePath, data) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
-}
-
-function shouldAlert(now, problemKey) {
-  const state = readJson(statePath);
-  if (state?.lastProblemKey !== problemKey) return true;
-  if (!state?.lastAlertAt) return true;
-  return now - Date.parse(state.lastAlertAt) > alertCooldownMs;
+function configuredDuration(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
 function chromeExecutablePath() {
@@ -48,17 +53,24 @@ async function lemengOk(page) {
   return (await page.locator("input[type='password']").count()) === 0;
 }
 
-async function main() {
-  loadEnv();
-
-  const now = Date.now();
+async function inspectLogins(timeoutMs) {
   const userDataDir = path.resolve(process.env.USER_DATA_DIR || "output/browser-profile");
   fs.mkdirSync(userDataDir, { recursive: true });
-
   const problems = [];
+  const configuredWaitMs = configuredDuration(
+    "BROWSER_LOCK_WAIT_MS",
+    10 * 60 * 1000,
+  );
+  const lockWaitMs = Number.isFinite(timeoutMs)
+    ? Math.max(1, Math.min(configuredWaitMs, timeoutMs))
+    : configuredWaitMs;
+
   await withLock("browser-profile", {
-    waitMs: Number(process.env.BROWSER_LOCK_WAIT_MS || 10 * 60 * 1000),
-    staleMs: Number(process.env.BROWSER_LOCK_STALE_MS || 30 * 60 * 1000),
+    waitMs: lockWaitMs,
+    staleMs: configuredDuration(
+      "BROWSER_LOCK_STALE_MS",
+      30 * 60 * 1000,
+    ),
   }, async () => {
     const context = await chromium.launchPersistentContext(userDataDir, {
       headless: process.env.HEADLESS === "true",
@@ -67,57 +79,195 @@ async function main() {
 
     const page = context.pages()[0] || await context.newPage();
     try {
-      if (!(await zhimadiOk(page))) problems.push("芝麻地登录态失效");
-      if (!(await lemengOk(page))) problems.push("乐檬登录态失效");
+      try {
+        if (!(await zhimadiOk(page))) problems.push("芝麻地登录态失效");
+      } catch (error) {
+        problems.push(`芝麻地登录检查失败：${error.message || error}`);
+      }
+      try {
+        if (!(await lemengOk(page))) problems.push("乐檬登录态失效");
+      } catch (error) {
+        problems.push(`乐檬登录检查失败：${error.message || error}`);
+      }
     } finally {
       await context.close();
     }
   });
 
-  if (problems.length === 0) {
-    writeJson(statePath, {
-      status: "ok",
-      lastCheckAt: new Date(now).toISOString(),
-    });
-    console.log("login-ok");
-    return;
+  return problems;
+}
+
+function classifyLoginFailure(message) {
+  const text = String(message || "");
+  if (text.includes("芝麻地")) {
+    return { problemKey: "zhimadi-login", retryable: true };
   }
-
-  const problemKey = problems.join(",");
-  const zhimadiFailed = problems.some((problem) => problem.includes("芝麻地"));
-  const alertProblems = problems.filter((problem) => !problem.includes("芝麻地"));
-
-  if (zhimadiFailed) {
-    writeJson(repairRequestPath, {
-      requestedAt: new Date(now).toISOString(),
-      reason: "login-healthcheck",
-    });
+  if (text.includes("乐檬")) {
+    return { problemKey: "lemeng-login", retryable: true };
   }
+  return { problemKey: "login-transient", retryable: true };
+}
 
-  let alerted = false;
-  if (alertProblems.length > 0 && shouldAlert(now, alertProblems.join(","))) {
-    await sendDingTalkMarkdown(
-      "水果店登录态异常",
-      `### 水果店登录态异常\n\n${alertProblems.map((problem) => `- ${problem}`).join("\n")}`,
-      { alert: true },
-    );
-    alerted = true;
+function verifiedLoginProbeKeys(failure, message) {
+  if (
+    failure.problemKey === "zhimadi-login"
+    && !String(message).includes("乐檬")
+  ) {
+    return ["lemeng-login"];
   }
+  if (failure.problemKey === "lemeng-login") {
+    return ["zhimadi-login"];
+  }
+  return [];
+}
 
-  writeJson(statePath, {
-    status: "failed",
-    lastCheckAt: new Date(now).toISOString(),
-    lastAlertAt: alerted ? new Date(now).toISOString() : readJson(statePath)?.lastAlertAt || null,
-    lastProblemKey: problemKey,
-    problems,
+async function runLoginInspection(timeoutMs) {
+  await runNodePreview(__filename, {
+    args: ["--probe-only"],
+    timeoutMs,
+    label: "登录预检",
+    env: {
+      HEALTHCHECK_PREVIEW: "1",
+      LOGIN_PROBE_TIMEOUT_MS: String(timeoutMs),
+    },
   });
-  console.log(`login-failed: ${problemKey}`);
-  process.exitCode = 1;
+  return [];
+}
+
+function createLoginProbe(options = {}) {
+  const {
+    inspect = runLoginInspection,
+    persistRepairRequest = (request) => writeJson(repairRequestPath, request),
+    loadRepairState = () => readJson(repairStatePath),
+    now = () => Date.now(),
+    repairRetryMs = configuredDuration(
+      "ZHIMADI_REPAIR_RETRY_MS",
+      defaultRepairRetryMs,
+    ),
+  } = options;
+  let lastRequestAt = null;
+  let lastRequestMs = null;
+
+  function maybeRequestRepair(message, verifyOnly) {
+    if (verifyOnly || !String(message).includes("芝麻地")) return;
+    const currentTime = now();
+    if (lastRequestAt) {
+      if (currentTime - lastRequestMs < repairRetryMs) return;
+      const repairState = loadRepairState();
+      const matchingState = repairState?.handledRequestAt === lastRequestAt;
+      if (
+        matchingState
+        && !["failed", "starting"].includes(repairState.status)
+      ) {
+        return;
+      }
+    }
+
+    const requestedAt = new Date(currentTime).toISOString();
+    persistRepairRequest({
+      requestedAt,
+      reason: "login-healthcheck",
+      failureAlertOwner: "login-healthcheck",
+    });
+    lastRequestAt = requestedAt;
+    lastRequestMs = currentTime;
+  }
+
+  return async ({ timeoutMs, verifyOnly = false } = {}) => {
+    let problems;
+    try {
+      problems = await inspect(timeoutMs);
+    } catch (error) {
+      maybeRequestRepair(finalHealthFailureMessage(error), verifyOnly);
+      throw error;
+    }
+    if (problems.length === 0) return "login-ok";
+
+    const message = `登录态异常：${problems.join("；")}`;
+    maybeRequestRepair(message, verifyOnly);
+    throw new Error(message);
+  };
+}
+
+async function checkLoginHealth(options = {}) {
+  return checkReportHealth({
+    ...options,
+    loadState: options.loadState || (() => readJson(statePath)),
+    persist: options.persist || ((state) => writeJson(statePath, state)),
+    runPreview: options.runPreview || createLoginProbe({
+      now: options.now,
+    }),
+    classify: options.classify || classifyLoginFailure,
+    alertTitle: "水果店登录态异常",
+    formatAlertText: ({ message, recoveryText }) =>
+      `### 水果店登录态异常\n\n${recoveryText}\n\n${message}`,
+    logPrefix: "login",
+    alertSource: "login-healthcheck",
+    claimAlert: options.claimAlert || claimHealthAlert,
+    getSharedAlertState: options.getSharedAlertState || getHealthAlertState,
+    isSharedProblem: options.isSharedProblem || isSharedHealthProblem,
+    resolveAlert: options.resolveAlert || resolveHealthAlert,
+    verifiedProblemKeys: options.verifiedProblemKeys || verifiedLoginProbeKeys,
+    recoveryWindowMs: options.recoveryWindowMs ?? configuredDuration(
+      "HEALTH_RECOVERY_WINDOW_MS",
+      defaultRecoveryWindowMs,
+    ),
+    retryIntervalMs: options.retryIntervalMs ?? configuredDuration(
+      "HEALTH_RETRY_INTERVAL_MS",
+      defaultRetryIntervalMs,
+    ),
+    previewTimeoutMs: options.previewTimeoutMs ?? configuredDuration(
+      "LOGIN_HEALTHCHECK_TIMEOUT_MS",
+      defaultPreviewTimeoutMs,
+    ),
+  });
+}
+
+async function probeMain() {
+  loadEnv();
+  const timeoutMs = configuredDuration(
+    "LOGIN_PROBE_TIMEOUT_MS",
+    defaultPreviewTimeoutMs,
+  );
+  const problems = await inspectLogins(timeoutMs);
+  if (problems.length > 0) {
+    throw new Error(`登录态异常：${problems.join("；")}`);
+  }
+  console.log("login-ok");
+}
+
+async function main() {
+  loadEnv();
+  try {
+    await withLock("login-healthcheck", {
+      waitMs: 5000,
+      staleMs: 45 * 60 * 1000,
+    }, async () => {
+      const result = await checkLoginHealth();
+      if (result.status === "failed") process.exitCode = 1;
+    });
+  } catch (error) {
+    if (String(error.message || error).includes("等待 login-healthcheck 锁超时")) {
+      console.log("login-healthcheck-already-running");
+      return;
+    }
+    throw error;
+  }
 }
 
 if (require.main === module) {
-  main().catch((error) => {
+  const action = process.argv.includes("--probe-only") ? probeMain : main;
+  action().catch((error) => {
     console.error(error.stack || error.message);
+    writeHealthFailure(error);
     process.exit(1);
   });
 }
+
+module.exports = {
+  checkLoginHealth,
+  classifyLoginFailure,
+  createLoginProbe,
+  inspectLogins,
+  runLoginInspection,
+};

@@ -3,6 +3,10 @@ const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
 const { loadEnv, sendDingTalkMarkdown } = require("./send-dingtalk.cjs");
+const {
+  extractHealthFailure,
+  writeHealthFailure,
+} = require("./healthcheck-error.cjs");
 
 const statePath = path.resolve("output/douyin-dual-report-state.json");
 
@@ -55,9 +59,14 @@ function runPreview(source, suffix, reuseBaseSuffix = "") {
         resolve();
       } else {
         const label = source === "aggregate-api" ? "聚合接口" : "网页";
-        reject(new Error(
+        const error = new Error(
           `抖音${label}版月报生成失败，退出码 ${code}：${outputTail.trim()}`,
-        ));
+        );
+        const healthFailureMessage = extractHealthFailure(outputTail);
+        if (healthFailureMessage) {
+          error.healthFailureMessage = healthFailureMessage;
+        }
+        reject(error);
       }
     });
   });
@@ -297,6 +306,7 @@ async function main() {
 if (require.main === module) {
   main().catch((error) => {
     console.error(error.stack || error.message);
+    writeHealthFailure(error);
     process.exit(1);
   });
 }
