@@ -3,6 +3,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 const { withLock } = require("./runtime-lock.cjs");
 const { loadEnv, sendDingTalkMarkdown } = require("./send-dingtalk.cjs");
+const { markReportHealthOk } = require("./check-report-health.cjs");
 
 const statePath = path.resolve("output/scheduled-report-state.json");
 
@@ -68,6 +69,7 @@ async function main() {
   }, async () => {
     const previous = readJson(statePath);
     if (previous?.date === date && previous.status === "sent") {
+      markReportHealthOk(previous.sentAt || new Date().toISOString());
       console.log(`scheduled-report-skip: ${date} already sent`);
       return;
     }
@@ -86,12 +88,14 @@ async function main() {
       : "scripts/daily-report.cjs";
     const result = await runReport(scriptPath);
     if (result.code === 0) {
+      const sentAt = new Date().toISOString();
       writeJson(statePath, {
         date,
         status: "sent",
         attempts,
-        sentAt: new Date().toISOString(),
+        sentAt,
       });
+      markReportHealthOk(sentAt);
       console.log(`scheduled-report-sent: ${date} attempt ${attempts}`);
       return;
     }

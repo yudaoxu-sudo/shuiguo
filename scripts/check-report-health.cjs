@@ -65,6 +65,16 @@ function writeJson(filePath, data) {
   }
 }
 
+function markReportHealthOk(
+  checkedAt = new Date().toISOString(),
+  persist = (state) => writeJson(statePath, state),
+) {
+  persist({
+    status: "ok",
+    lastCheckAt: checkedAt,
+  });
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -364,10 +374,7 @@ async function checkReportHealth(options = {}) {
     try {
       await runPreview({ timeoutMs, verifyOnly: finalVerification });
       const checkedAt = new Date(now()).toISOString();
-      persist({
-        status: "ok",
-        lastCheckAt: checkedAt,
-      });
+      markReportHealthOk(checkedAt, persist);
       await resolveClaims(
         ["zhimadi-login", "lemeng-login"],
         checkedAt,
@@ -635,6 +642,7 @@ module.exports = {
   activeIncidentStartedAt,
   checkReportHealth,
   classifyReportFailure,
+  markReportHealthOk,
   readJson,
   runNodePreview,
   runReportPreview,

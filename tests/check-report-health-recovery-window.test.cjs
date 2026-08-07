@@ -6,6 +6,7 @@ const test = require("node:test");
 
 const {
   checkReportHealth,
+  markReportHealthOk,
   runNodePreview,
 } = require("../scripts/check-report-health.cjs");
 const {
@@ -14,6 +15,24 @@ const {
 
 const baseNow = Date.parse("2026-07-30T04:00:00.000Z");
 const silent = () => {};
+
+test("a scheduled report can mark report health healthy at its proof time", () => {
+  let state;
+  markReportHealthOk("2026-08-07T14:12:00.000Z", (next) => {
+    state = next;
+  });
+  assert.deepEqual(state, {
+    status: "ok",
+    lastCheckAt: "2026-08-07T14:12:00.000Z",
+  });
+
+  const scheduledSource = fs.readFileSync(
+    path.resolve(__dirname, "../scripts/run-scheduled-report.cjs"),
+    "utf8",
+  );
+  assert.match(scheduledSource, /markReportHealthOk\(sentAt\)/);
+  assert.match(scheduledSource, /markReportHealthOk\(previous\.sentAt/);
+});
 
 test("timeout waits for the process-group kill before retry can continue", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "preview-timeout-"));
