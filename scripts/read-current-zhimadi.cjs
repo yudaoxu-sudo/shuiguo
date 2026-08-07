@@ -411,6 +411,15 @@ function buildMarkdown(dateText, report, lemeng = null, douyin = null) {
     lemeng.ranking,
     monthly.stores || [],
   );
+  const storeSyncAdjustment = Number(
+    monthly.store_sync_adjustment_cents || 0,
+  ) / 100;
+  if (storeSyncAdjustment !== 0) {
+    lines.push(
+      "",
+      `> 数据说明：抖音门店分项暂未同步，已按平台本月总额记录同步差额 ${formatMoney(storeSyncAdjustment)}。`,
+    );
+  }
   lines.push("", "#### 门店营业与毛利（按本月毛利金额排名）");
   for (const row of storeFinancials.rows) {
     lines.push(

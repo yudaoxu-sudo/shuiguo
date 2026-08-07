@@ -1,6 +1,9 @@
 const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
+const {
+  reconcileDouyinStoreRows,
+} = require("./douyin-store-reconciliation.cjs");
 
 const DEFAULT_FINANCE_URL = "https://life.douyin.com/p/finance/v2/home";
 
@@ -75,6 +78,7 @@ function buildDouyinBrowserSummary({
   merchantDue,
   dateRows,
   storeRows,
+  allowSyncAdjustment = false,
 }) {
   const merchantDueCents = moneyToCents(merchantDue);
   const pendingRows = dateRows.filter((row) => row.status.includes("待结算"));
@@ -88,26 +92,15 @@ function buildDouyinBrowserSummary({
     0,
   );
   const actualReceivedCents = merchantDueCents - expectedReceivedCents;
-  const stores = storeRows.map((row) => ({
+  const sourceStores = storeRows.map((row) => ({
     store: row.store,
     merchant_due_cents: moneyToCents(row.merchantDue),
   }));
-  const storeTotalCents = stores.reduce(
-    (sum, row) => sum + row.merchant_due_cents,
-    0,
+  const reconciliation = reconcileDouyinStoreRows(
+    sourceStores,
+    merchantDueCents,
+    { allowSyncAdjustment },
   );
-  const residualCents = merchantDueCents - storeTotalCents;
-  if (residualCents < -1) {
-    throw new Error(
-      `抖音门店汇总超过本月总额：门店 ${storeTotalCents} 分，总额 ${merchantDueCents} 分`,
-    );
-  }
-  if (Math.abs(residualCents) > 1) {
-    stores.push({
-      store: "未归属门店",
-      merchant_due_cents: residualCents,
-    });
-  }
 
   const reportMonth = reportDate.slice(0, 7);
   return {
@@ -125,7 +118,10 @@ function buildDouyinBrowserSummary({
         expected_received_cents: expectedReceivedCents,
         merchant_due_cents: merchantDueCents,
       },
-      stores,
+      stores: reconciliation.stores,
+      ...(reconciliation.syncAdjustmentCents
+        ? { store_sync_adjustment_cents: reconciliation.syncAdjustmentCents }
+        : {}),
       cached_day_count: Number(reportDate.slice(8, 10)),
       missing_dates: [],
     },
@@ -358,7 +354,7 @@ async function extractTable(
   return result.rows;
 }
 
-async function readDouyinBrowser(context, monthThrough) {
+async function readDouyinBrowser(context, monthThrough, options = {}) {
   const reportDate = monthThrough || formatDate();
   const page = await context.newPage();
   try {
@@ -416,6 +412,7 @@ async function readDouyinBrowser(context, monthThrough) {
       merchantDue,
       dateRows,
       storeRows,
+      allowSyncAdjustment: options.allowSyncAdjustment === true,
     });
   } catch (error) {
     const outputDir = path.resolve("output/debug");

@@ -1,4 +1,4 @@
-async function readDouyin(monthThrough, context) {
+async function readDouyin(monthThrough, context, options = {}) {
   if (!context) {
     throw new Error("抖音后台汇总读取需要浏览器上下文");
   }
@@ -8,14 +8,14 @@ async function readDouyin(monthThrough, context) {
     const {
       readDouyinAggregateApi,
     } = require("./read-current-douyin-aggregate-api.cjs");
-    return readDouyinAggregateApi(context, monthThrough);
+    return readDouyinAggregateApi(context, monthThrough, options);
   }
   if (source !== "browser") {
     throw new Error(`不支持的抖音数据来源：${source}`);
   }
 
   const { readDouyinBrowser } = require("./read-current-douyin-browser.cjs");
-  return readDouyinBrowser(context, monthThrough);
+  return readDouyinBrowser(context, monthThrough, options);
 }
 
 module.exports = { readDouyin };

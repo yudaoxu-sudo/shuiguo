@@ -111,12 +111,23 @@ function compareDouyinSources(apiReport, browserReport) {
     && Number.isFinite(browserGeneratedAt)
     ? Math.round(Math.abs(browserGeneratedAt - apiGeneratedAt) / 1000)
     : null;
+  const apiSyncAdjustment = Number(
+    apiMonthly.store_sync_adjustment_cents || 0,
+  );
+  const browserSyncAdjustment = Number(
+    browserMonthly.store_sync_adjustment_cents || 0,
+  );
+  const provisional = apiSyncAdjustment !== 0 || browserSyncAdjustment !== 0;
 
   return {
-    exact: actualDiff === 0
+    exact: !provisional
+      && actualDiff === 0
       && expectedDiff === 0
       && totalDiff === 0
       && storeDifferences.length === 0,
+    provisional,
+    api_sync_adjustment_cents: apiSyncAdjustment,
+    browser_sync_adjustment_cents: browserSyncAdjustment,
     actual_difference_cents: actualDiff,
     expected_difference_cents: expectedDiff,
     total_difference_cents: totalDiff,
@@ -133,6 +144,13 @@ function formatCents(cents) {
 }
 
 function comparisonText(comparison) {
+  if (comparison.provisional) {
+    return [
+      "双来源读取存在平台同步校准，本次不计严格一致。",
+      `聚合接口校准 ${formatCents(comparison.api_sync_adjustment_cents)}，`,
+      `网页校准 ${formatCents(comparison.browser_sync_adjustment_cents)}。`,
+    ].join("");
+  }
   if (comparison.exact) {
     return "双来源核对：本月总额、已到账、预计到账和门店汇总全部一致。";
   }

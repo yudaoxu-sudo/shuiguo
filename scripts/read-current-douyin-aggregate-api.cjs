@@ -1,6 +1,9 @@
 const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
+const {
+  reconcileDouyinStoreRows,
+} = require("./douyin-store-reconciliation.cjs");
 
 const DEFAULT_FINANCE_URL = "https://life.douyin.com/p/finance/v2/home";
 const DATE_STATISTICS_PATH = "/life/settle/v1/bill/query_date_statistics/";
@@ -64,6 +67,7 @@ function buildDouyinAggregateApiSummary({
   datePayload,
   storePayload,
   storePageSize = 50,
+  allowSyncAdjustment = false,
 }) {
   assertApiSuccess(datePayload, "本月到账汇总");
   assertApiSuccess(storePayload, "本月门店汇总");
@@ -101,7 +105,7 @@ function buildDouyinAggregateApiSummary({
     );
   }
 
-  const stores = rawStores.map((row) => {
+  const sourceStores = rawStores.map((row) => {
     const store = String(row.classify_name || "").trim();
     if (!store) throw new Error("抖音聚合接口门店汇总缺少门店名称");
     return {
@@ -110,22 +114,11 @@ function buildDouyinAggregateApiSummary({
     };
   });
 
-  const storeTotalCents = stores.reduce(
-    (sum, row) => sum + row.merchant_due_cents,
-    0,
+  const reconciliation = reconcileDouyinStoreRows(
+    sourceStores,
+    merchantDueCents,
+    { label: "抖音聚合接口", allowSyncAdjustment },
   );
-  const residualCents = merchantDueCents - storeTotalCents;
-  if (residualCents < -1) {
-    throw new Error(
-      `抖音聚合接口门店汇总超过本月总额：门店 ${storeTotalCents} 分，总额 ${merchantDueCents} 分`,
-    );
-  }
-  if (Math.abs(residualCents) > 1) {
-    stores.push({
-      store: "未归属门店",
-      merchant_due_cents: residualCents,
-    });
-  }
 
   const reportMonth = reportDate.slice(0, 7);
   const generatedAt = new Date().toISOString();
@@ -144,7 +137,10 @@ function buildDouyinAggregateApiSummary({
         expected_received_cents: expectedReceivedCents,
         merchant_due_cents: merchantDueCents,
       },
-      stores,
+      stores: reconciliation.stores,
+      ...(reconciliation.syncAdjustmentCents
+        ? { store_sync_adjustment_cents: reconciliation.syncAdjustmentCents }
+        : {}),
       cached_day_count: Number(reportDate.slice(8, 10)),
       missing_dates: [],
     },
@@ -217,7 +213,7 @@ async function fetchJsonInPage(page, url, label) {
   }
 }
 
-async function readDouyinAggregateApi(context, monthThrough) {
+async function readDouyinAggregateApi(context, monthThrough, options = {}) {
   const reportDate = monthThrough || formatDate();
   const page = await context.newPage();
   try {
@@ -263,6 +259,7 @@ async function readDouyinAggregateApi(context, monthThrough) {
       reportDate,
       datePayload,
       storePayload,
+      allowSyncAdjustment: options.allowSyncAdjustment === true,
     });
   } catch (error) {
     const outputDir = path.resolve("output/debug");

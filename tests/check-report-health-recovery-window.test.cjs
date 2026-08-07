@@ -64,11 +64,13 @@ function createHarness(outcomes, initialState = null) {
       const outcome = outcomes[Math.min(harness.attempts, outcomes.length - 1)];
       harness.attempts += 1;
       if (outcome.hang) {
-        harness.now += options.timeoutMs;
-        throw new Error(
+        harness.now += options.timeoutMs + (outcome.killGraceMs || 0);
+        const error = new Error(
           outcome.error
             || `报表预检超时 ${Math.round(options.timeoutMs / 1000)} 秒`,
         );
+        error.code = outcome.code || "PREVIEW_TIMEOUT";
+        throw error;
       }
       if (outcome.advanceMs) harness.now += outcome.advanceMs;
       if (outcome.error) {
@@ -392,6 +394,47 @@ test("an expired incident uses only the bounded final verification timeout", asy
   assert.equal(result.status, "failed");
   assert.equal(harness.previewOptions[0].timeoutMs, 2 * 60 * 1000);
   assert.equal(harness.state.lastAlertAt, "2026-07-30T04:22:00.000Z");
+});
+
+test("a deadline-bounded timeout preserves the previous source incident", async () => {
+  const harness = createHarness([
+    { error: "报表预检退出码 1：抖音门店汇总超过本月总额" },
+    { hang: true, killGraceMs: 3000 },
+  ]);
+  const claimed = [];
+
+  const result = await checkReportHealth({
+    ...harness.options,
+    recoveryWindowMs: 20 * 60 * 1000,
+    retryIntervalMs: 19 * 60 * 1000 + 10 * 1000,
+    previewTimeoutMs: 10 * 60 * 1000,
+    finalVerificationTimeoutMs: 2 * 60 * 1000,
+    claimAlert: async (problemKey) => {
+      claimed.push(problemKey);
+      return true;
+    },
+  });
+
+  assert.equal(result.status, "failed");
+  assert.equal(harness.previewOptions[1].timeoutMs, 50 * 1000);
+  assert.equal(harness.state.problemKey, "douyin-report");
+  assert.equal(harness.state.incidentStartedAt, "2026-07-30T04:00:00.000Z");
+  assert.equal(harness.state.recoveryDeadlineAt, "2026-07-30T04:20:00.000Z");
+  assert.match(harness.state.message, /抖音门店汇总超过本月总额/);
+  assert.match(harness.state.message, /最终复验：报表预检超时/);
+  assert.equal(harness.sends.length, 1);
+  assert.deepEqual(claimed, ["douyin-report"]);
+
+  const repeated = createHarness([
+    { error: "报表预检退出码 1：抖音门店汇总超过本月总额" },
+  ], harness.state);
+  repeated.now = harness.now + 1000;
+  const repeatedResult = await checkReportHealth({
+    ...repeated.options,
+    recoveryWindowMs: 20 * 60 * 1000,
+  });
+  assert.equal(repeatedResult.alerted, false);
+  assert.equal(repeated.sends.length, 0);
 });
 
 test("an uncertain alert delivery is reserved and never repeated", async () => {

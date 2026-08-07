@@ -23,6 +23,9 @@ const {
   buildDouyinAggregateApiSummary,
 } = require("../scripts/read-current-douyin-aggregate-api.cjs");
 const {
+  reconcileDouyinStoreRows,
+} = require("../scripts/douyin-store-reconciliation.cjs");
+const {
   compareDouyinSources,
   comparisonText,
   recordDualReportArtifactState,
@@ -211,14 +214,100 @@ test("keeps the production Byted pager selectors and disabled-next fallback", ()
   assert.match(source, /navigationItems\[navigationItems\.length - 1\]/);
 });
 
-test("documents the exact plus-or-minus one-cent store residual tolerance", () => {
+test("reconciles only a bounded negative Douyin store residual", () => {
+  const oneCentOver = reconcileDouyinStoreRows(
+    [{ store: "古城街店", merchant_due_cents: 10001 }],
+    10000,
+  );
+  assert.equal(oneCentOver.stores.at(-1).merchant_due_cents, -1);
+  const oneCentUnder = reconcileDouyinStoreRows(
+    [{ store: "古城街店", merchant_due_cents: 9999 }],
+    10000,
+  );
+  assert.equal(oneCentUnder.stores.at(-1).merchant_due_cents, 1);
+
+  const accepted = reconcileDouyinStoreRows(
+    [{ store: "古城街店", merchant_due_cents: 10050000 }],
+    10000000,
+    { allowSyncAdjustment: true },
+  );
+  assert.deepEqual(accepted.stores.at(-1), {
+    store: "平台同步差额",
+    merchant_due_cents: -50000,
+    kind: "platform_sync_adjustment",
+  });
+  assert.equal(
+    accepted.stores.reduce((sum, row) => sum + row.merchant_due_cents, 0),
+    10000000,
+  );
+
+  assert.throws(() => reconcileDouyinStoreRows(
+    [{ store: "古城街店", merchant_due_cents: 20050001 }],
+    20000000,
+    { allowSyncAdjustment: true },
+  ), /超过本月总额/);
+  assert.throws(() => reconcileDouyinStoreRows(
+    [{ store: "古城街店", merchant_due_cents: 1005001 }],
+    1000000,
+    { allowSyncAdjustment: true },
+  ), /超过本月总额/);
+  assert.throws(() => reconcileDouyinStoreRows(
+    [{ store: "古城街店", merchant_due_cents: 2 }],
+    0,
+    { allowSyncAdjustment: true },
+  ), /超过本月总额/);
+});
+
+test("browser and aggregate builders use sync adjustment only when allowed", () => {
+  const browserInput = {
+    reportDate: "2026-08-07",
+    merchantDue: "1,000.00",
+    dateRows: [{ date: "2026-08-07", status: "待结算", merchantDue: "100.00" }],
+    storeRows: [{ store: "古城街店", merchantDue: "1,004.00" }],
+  };
+  assert.throws(() => buildDouyinBrowserSummary(browserInput), /超过本月总额/);
+  const browser = buildDouyinBrowserSummary({
+    ...browserInput,
+    allowSyncAdjustment: true,
+  });
+  assert.equal(browser.monthly.store_sync_adjustment_cents, -400);
+
+  const aggregateInput = {
+    reportDate: "2026-08-07",
+    datePayload: {
+      status_code: 0,
+      data: { bill_date_statistics_list: [{ income: 100000, settled_income: 90000 }] },
+    },
+    storePayload: {
+      status_code: 0,
+      data: {
+        bill_statistics_list: [{ classify_name: "古城街店", income: 100400 }],
+        page_info: { total_count: 1, page_count: 1 },
+      },
+    },
+  };
+  assert.throws(() => buildDouyinAggregateApiSummary(aggregateInput), /超过本月总额/);
+  const aggregate = buildDouyinAggregateApiSummary({
+    ...aggregateInput,
+    allowSyncAdjustment: true,
+  });
+  assert.equal(aggregate.monthly.store_sync_adjustment_cents, -400);
+});
+
+test("documents the bounded Douyin store sync adjustment", () => {
   const decision = fs.readFileSync(
     path.resolve(__dirname, "../docs/douyin-source-decision-2026-07.md"),
     "utf8",
   );
-  assert.match(decision, /相差 ±1 分以内视为舍入容差/);
-  assert.match(decision, /总额高出超过 1 分记"未归属门店"/);
-  assert.match(decision, /门店合计高出超过 1 分报错/);
+  assert.match(decision, /同时不超过 500 元和总额 0\.5%/);
+  assert.match(decision, /负向"平台同步差额"/);
+  assert.match(decision, /provisional，不计入双来源严格一致观察日/);
+
+  const dailyReport = fs.readFileSync(
+    path.resolve(__dirname, "../scripts/daily-report.cjs"),
+    "utf8",
+  );
+  assert.match(dailyReport, /allowSyncAdjustment:\s*attempt === totalAttempts/);
 });
 
 test("builds monthly Douyin totals with two aggregate API responses", () => {
@@ -329,6 +418,15 @@ test("compares the aggregate API and webpage Douyin summaries", () => {
   assert.equal(different.store_differences.length, 1);
   assert.equal(different.read_gap_seconds, 19);
   assert.match(comparisonText(different), /相隔 19 秒/);
+
+  const adjustedApi = structuredClone(apiReport);
+  const adjustedBrowser = structuredClone(apiReport);
+  adjustedApi.monthly.store_sync_adjustment_cents = -100;
+  adjustedBrowser.monthly.store_sync_adjustment_cents = -100;
+  const provisional = compareDouyinSources(adjustedApi, adjustedBrowser);
+  assert.equal(provisional.exact, false);
+  assert.equal(provisional.provisional, true);
+  assert.match(comparisonText(provisional), /不计严格一致/);
 });
 
 test("no-send dual preview refreshes artifact evidence without rewriting send proof", () => {
@@ -525,6 +623,51 @@ test("renders one metric per mobile line with the unified monthly formula", () =
   );
   assert.match(markdown, /#### 其他进货（未匹配门店）\n\n\*\*张献铖\*\*：115\.46/);
   assert.doesNotMatch(markdown, /2\.5%|抖音券手续费|昨日经营|账单回补/);
+});
+
+test("renders a visible warning for a Douyin platform sync adjustment", () => {
+  const markdown = buildMarkdown(
+    "2026-08-07",
+    {
+      totals: { sales: 7000 },
+      rows: [{ store: "有花头古城街店", sales: 7000 }],
+    },
+    {
+      monthly: { salesWithoutCoupon: 10000 },
+      ranking: [{
+        rank: 1,
+        store: "有花头古城街店",
+        sales: 10000,
+        rate: "100.00%",
+      }],
+    },
+    {
+      monthly: {
+        report_month: "2026-08",
+        complete: true,
+        cached_day_count: 7,
+        missing_dates: [],
+        store_sync_adjustment_cents: -400,
+        settlement: {
+          actual_received_cents: 90000,
+          expected_received_cents: 10000,
+          merchant_due_cents: 100000,
+        },
+        stores: [
+          { store: "有花头(古城街店)", merchant_due_cents: 100400 },
+          {
+            store: "平台同步差额",
+            merchant_due_cents: -400,
+            kind: "platform_sync_adjustment",
+          },
+        ],
+      },
+    },
+  );
+
+  assert.match(markdown, /门店分项暂未同步/);
+  assert.match(markdown, /同步差额 -4\.00/);
+  assert.match(markdown, /未匹配抖音门店[\s\S]*平台同步差额[\s\S]*-4\.00/);
 });
 
 test("rejects Douyin totals that do not reconcile with store details", () => {

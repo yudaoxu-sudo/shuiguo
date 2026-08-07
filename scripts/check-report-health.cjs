@@ -207,6 +207,7 @@ function runNodePreview(scriptPath, options = {}) {
     const timeoutError = new Error(
       `${label}超时 ${Math.round(timeoutMs / 1000)} 秒`,
     );
+    timeoutError.code = "PREVIEW_TIMEOUT";
     const finish = (handler, value) => {
       if (settled) return;
       settled = true;
@@ -356,6 +357,9 @@ async function checkReportHealth(options = {}) {
       : remainingMs === null
         ? previewTimeoutMs
         : Math.max(1, Math.min(previewTimeoutMs, remainingMs));
+    const deadlineBounded = remainingMs !== null
+      && remainingMs > 0
+      && timeoutMs < previewTimeoutMs;
 
     try {
       await runPreview({ timeoutMs, verifyOnly: finalVerification });
@@ -376,9 +380,27 @@ async function checkReportHealth(options = {}) {
     } catch (error) {
       const failedAt = now();
       const checkedAt = new Date(failedAt).toISOString();
-      const message = finalHealthFailureMessage(error).slice(0, 1200);
-      const failure = classify(message);
       const state = loadState();
+      const latestMessage = finalHealthFailureMessage(error).slice(0, 1200);
+      let message = latestMessage;
+      let failure = classify(message);
+      if (
+        error?.code === "PREVIEW_TIMEOUT"
+        && (finalVerification || (deadlineBounded && failedAt >= incident?.deadline))
+        && incident
+        && state?.incidentId === incident.id
+        && state?.problemKey === incident.problemKey
+        && state?.message
+      ) {
+        const previousMessage = String(state.message).slice(0, 1200);
+        const previousFailure = classify(previousMessage);
+        if (previousFailure.problemKey === incident.problemKey) {
+          const suffix = `\n最终复验：${latestMessage}`.slice(0, 1200);
+          const prefixLength = Math.max(0, 1200 - suffix.length);
+          message = `${previousMessage.slice(0, prefixLength)}${suffix}`;
+          failure = previousFailure;
+        }
+      }
       const sharedAlertState = await getSharedAlertState(failure.problemKey);
       const sharedResolvedAt = Date.parse(
         sharedAlertState?.resolvedAt || "",
@@ -416,7 +438,7 @@ async function checkReportHealth(options = {}) {
           const proposedDeadline = failedAt
             + (failure.retryable ? recoveryWindowMs : 0);
           const deadline = failure.retryable && recoveryCeiling !== null
-            ? Math.min(proposedDeadline, recoveryCeiling)
+            ? Math.max(failedAt, Math.min(proposedDeadline, recoveryCeiling))
             : proposedDeadline;
           incident = {
             id: new Date(failedAt).toISOString(),

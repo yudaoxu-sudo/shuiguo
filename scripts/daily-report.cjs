@@ -198,7 +198,7 @@ async function retryStep(name, action, attempts = 3) {
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       if (attempt > 1) console.log(`${name}第 ${attempt} 次重试`);
-      return await action();
+      return await action(attempt, attempts);
     } catch (error) {
       lastError = error;
       console.warn(`${name}第 ${attempt} 次失败：${error.message}`);
@@ -522,7 +522,9 @@ async function runReportOnce(outputDir) {
       const douyin = process.env.DOUYIN_ENABLED === "true"
         ? await retryStep(
           "抖音报表",
-          () => readDouyin(undefined, context),
+          (attempt, totalAttempts) => readDouyin(undefined, context, {
+            allowSyncAdjustment: attempt === totalAttempts,
+          }),
           attempts,
         )
         : null;
