@@ -5,6 +5,13 @@ const { chromium } = require("playwright");
 const { DWClient, TOPIC_ROBOT } = require("dingtalk-stream");
 const { acquireLock } = require("./runtime-lock.cjs");
 const { gotoZhimadi, isZhimadiAuthenticated } = require("./zhimadi-navigation.cjs");
+const {
+  activeIncidentId,
+  createZhimadiRepairCoordinator,
+  markManualRepair,
+  requesterCanResumeReport,
+  runSingleCaptchaAttempt,
+} = require("./zhimadi-repair-coordinator.cjs");
 const { sendDingTalkImage, sendDingTalkMarkdown } = require("./send-dingtalk.cjs");
 const {
   handleHistoryCommand,
@@ -27,10 +34,6 @@ const repairRequestPath = path.resolve("output/zhimadi-login-repair-request.json
 const repairStatePath = path.resolve("output/zhimadi-login-repair-state.json");
 const douyinSmsStatePath = path.resolve("output/douyin-sms-repair-state.json");
 const douyinSmsTargetPath = path.resolve("output/douyin-sms-repair-target.json");
-const deferredRepairAlertOwners = new Set([
-  "report-healthcheck",
-  "login-healthcheck",
-]);
 const duplicateWindowMs = 3 * 60 * 1000;
 const loginSessionTtlMs = 5 * 60 * 1000;
 const captchaSelector = "#verifyCode";
@@ -57,10 +60,6 @@ function writeHeartbeat(status = "running") {
     pid: process.pid,
     updatedAt: new Date().toISOString(),
   }, null, 2));
-}
-
-function shouldSendZhimadiRepairFailureAlert(request) {
-  return !deferredRepairAlertOwners.has(request?.failureAlertOwner);
 }
 
 function chromeExecutablePath() {
@@ -408,6 +407,51 @@ function runMonthlyReport() {
   });
 }
 
+function runScheduledReport() {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["scripts/run-scheduled-report.cjs"], {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    child.stdout.on("data", (chunk) => {
+      output += chunk.toString();
+      process.stdout.write(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      output += chunk.toString();
+      process.stderr.write(chunk);
+    });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) resolve(output);
+      else {
+        const error = new Error(`定时报表续跑退出码 ${code}`);
+        error.output = output;
+        reject(error);
+      }
+    });
+  });
+}
+
+function selectReportRunner(reportResumeMode, {
+  scheduled = runScheduledReport,
+  monthly = runMonthlyReport,
+} = {}) {
+  return reportResumeMode === "scheduled" ? scheduled : monthly;
+}
+
+function isProcessRunning(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+
 async function uploadDingTalkImage(client, filePath) {
   const accessToken = await client.getAccessToken();
   const endpoints = [
@@ -620,30 +664,53 @@ async function refreshZhimadiCaptcha(session) {
   await session.page.waitForTimeout(1000);
 }
 
-async function tryAutoZhimadiLogin(session) {
-  const maxAttempts = Number(process.env.ZHIMADI_CAPTCHA_AUTO_ATTEMPTS || 2);
+function retryableZhimadiRepairError(error) {
+  if (error?.repairFatal === true) return false;
+  return /(?:Timeout|超时|net::|ERR_|Target closed|browser has been closed|ECONN|socket|temporar|fetch failed|\b429\b|\b5\d\d\b|rate.?limit|service unavailable|overloaded)/i
+    .test(String(error?.message || error));
+}
+
+function fatalZhimadiRepairError(message) {
+  const error = new Error(message);
+  error.repairFatal = true;
+  return error;
+}
+
+async function tryAutoZhimadiLogin(
+  session,
+  maxAttempts = Number(process.env.ZHIMADI_CAPTCHA_AUTO_ATTEMPTS || 2),
+) {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const { captchaPath } = await captureZhimadiCaptcha(session);
-    const { code, source } = await recognizeCaptcha(captchaPath);
-    if (!code) {
+    const result = await runSingleCaptchaAttempt({
+      capture: async () => {
+        if (session.captchaPath) {
+          const captchaPath = session.captchaPath;
+          session.captchaPath = null;
+          return { captchaPath };
+        }
+        return captureZhimadiCaptcha(session);
+      },
+      recognize: recognizeCaptcha,
+      submit: (code) => clickZhimadiLogin(session, code),
+      confirmAuthenticated: () => waitForZhimadiAuthenticated(session.page),
+      isRetryableError: retryableZhimadiRepairError,
+    });
+    if (result.reason === "empty-code") {
       console.warn(`验证码自动识别第 ${attempt} 次无有效结果`);
-      if (attempt === maxAttempts) return { ok: false, reason: "empty_code" };
+      if (attempt === maxAttempts) return result;
       await refreshZhimadiCaptcha(session);
       continue;
     }
+    if (result.outcome === "success") return result;
+    if (result.outcome === "fatal") return result;
 
-    try {
-      await submitZhimadiLoginCode(session, code);
-      return { ok: true };
-    } catch (error) {
-      console.warn(`验证码自动识别第 ${attempt} 次失败(${source}): ${error.message}`);
-      if (attempt === maxAttempts) return { ok: false, reason: "submit_failed" };
-      await refreshZhimadiCaptcha(session);
-    }
+    console.warn(`验证码自动识别第 ${attempt} 次失败(${result.source || "unknown"}): ${result.error || result.reason}`);
+    if (attempt === maxAttempts) return result;
+    await refreshZhimadiCaptcha(session);
   }
 
-  return { ok: false, reason: "unknown" };
+  return { outcome: "failed", reason: "unknown" };
 }
 
 async function startZhimadiLoginSession() {
@@ -658,77 +725,117 @@ async function startZhimadiLoginSession() {
     viewport: { width: 1440, height: 900 },
   });
 
-  const page = context.pages()[0] || await context.newPage();
-  await gotoZhimadi(page);
+  try {
+    const page = context.pages()[0] || await context.newPage();
+    await gotoZhimadi(page);
 
-  if (await isZhimadiAuthenticated(page)) {
-    await context.close();
-    return { alreadyLoggedIn: true };
+    if (await isZhimadiAuthenticated(page)) {
+      await context.close();
+      return { alreadyLoggedIn: true };
+    }
+
+    if ((await page.locator('input[name="account"]').count()) > 0) {
+      if (!process.env.ZHIMADI_USERNAME) {
+        throw fatalZhimadiRepairError("缺少芝麻地自动登录账号配置");
+      }
+      await page.locator('input[name="account"]').fill(process.env.ZHIMADI_USERNAME);
+    }
+    if ((await page.locator("#password").count()) > 0) {
+      if (!process.env.ZHIMADI_PASSWORD) {
+        throw fatalZhimadiRepairError("缺少芝麻地自动登录密码配置");
+      }
+      await page.locator("#password").fill(process.env.ZHIMADI_PASSWORD);
+    }
+
+    const session = {
+      context,
+      page,
+      expiresAt: Date.now() + loginSessionTtlMs,
+    };
+    const screenshots = await captureZhimadiCaptcha(session);
+
+    return {
+      ...session,
+      ...screenshots,
+    };
+  } catch (error) {
+    await context.close().catch(() => {});
+    throw error;
   }
-
-  if ((await page.locator('input[name="account"]').count()) > 0 && process.env.ZHIMADI_USERNAME) {
-    await page.locator('input[name="account"]').fill(process.env.ZHIMADI_USERNAME);
-  }
-  if ((await page.locator("#password").count()) > 0 && process.env.ZHIMADI_PASSWORD) {
-    await page.locator("#password").fill(process.env.ZHIMADI_PASSWORD);
-  }
-
-  const session = {
-    context,
-    page,
-    expiresAt: Date.now() + loginSessionTtlMs,
-  };
-  const screenshots = await captureZhimadiCaptcha(session);
-
-  return {
-    ...session,
-    ...screenshots,
-  };
 }
 
-async function isZhimadiLoginFormVisible(page) {
-  const selectors = [
-    'input[name="account"]',
-    "#password",
-    'input[name="verify_code"]',
-  ];
-
-  for (const selector of selectors) {
-    if (await page.locator(selector).first().isVisible().catch(() => false)) {
-      return true;
-    }
+async function waitForZhimadiAuthenticated(page, timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await isZhimadiAuthenticated(page)) return true;
+    await page.waitForTimeout(1000);
   }
   return false;
 }
 
-async function waitForZhimadiLoggedIn(page, timeoutMs = 60000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if ((await page.locator("iframe#sellSummary_customSummary, iframe[name='iframepage']").count()) > 0) return;
-    if (!(await isZhimadiLoginFormVisible(page))) return;
-    await page.waitForTimeout(1000);
+async function clickZhimadiLogin(session, code) {
+  await session.page.locator('input[name="verify_code"]').fill(code);
+  try {
+    await session.page.evaluate(() => {
+      const candidates = [...document.querySelectorAll("button,a,input[type=button],input[type=submit]")];
+      const button = candidates.find((element) => /登\s*录/.test(element.innerText || element.value || ""));
+      if (!button) throw new Error("找不到芝麻地登录按钮");
+      button.click();
+    });
+  } catch (error) {
+    if (String(error?.message || error).includes("找不到芝麻地登录按钮")) {
+      throw fatalZhimadiRepairError("找不到芝麻地登录按钮");
+    }
+    throw error;
   }
-
-  const bodyText = await page.locator("body").innerText({ timeout: 2000 }).catch(() => "");
-  throw new Error(`芝麻地登录提交后仍停留在登录页：${bodyText.replace(/\s+/g, " ").slice(0, 160)}`);
 }
 
 async function submitZhimadiLoginCode(session, code) {
-  await session.page.locator('input[name="verify_code"]').fill(code);
-  await session.page.evaluate(() => {
-    const candidates = [...document.querySelectorAll("button,a,input[type=button],input[type=submit]")];
-    const button = candidates.find((element) => /登\s*录/.test(element.innerText || element.value || ""));
-    if (!button) throw new Error("找不到芝麻地登录按钮");
-    button.click();
-  });
-  await waitForZhimadiLoggedIn(session.page);
-  await session.context.close();
+  await clickZhimadiLogin(session, code);
+  if (!(await waitForZhimadiAuthenticated(session.page))) {
+    throw new Error("芝麻地登录提交后未确认进入已登录页面");
+  }
 }
 
 async function closeLoginSession(session) {
   await session?.context?.close().catch(() => {});
   if (session?.expireTimer) clearTimeout(session.expireTimer);
   session?.profileLock?.release();
+}
+
+async function runSilentZhimadiRepairAttempt() {
+  let profileLock;
+  try {
+    profileLock = await acquireLock("browser-profile", {
+      waitMs: Number(process.env.ZHIMADI_SILENT_LOCK_WAIT_MS || 1000),
+      staleMs: Number(process.env.BROWSER_LOCK_STALE_MS || 30 * 60 * 1000),
+    });
+  } catch (error) {
+    if (String(error?.message || error).includes("等待 browser-profile 锁超时")) {
+      return { outcome: "lock-busy" };
+    }
+    return {
+      outcome: "fatal",
+      error: String(error?.message || error).slice(0, 240),
+    };
+  }
+
+  let session;
+  try {
+    session = await startZhimadiLoginSession();
+    session.profileLock = profileLock;
+    profileLock = null;
+    if (session.alreadyLoggedIn) return { outcome: "success" };
+    return await tryAutoZhimadiLogin(session, 1);
+  } catch (error) {
+    return {
+      outcome: retryableZhimadiRepairError(error) ? "failed" : "fatal",
+      error: String(error?.message || error).slice(0, 240),
+    };
+  } finally {
+    await closeLoginSession(session);
+    profileLock?.release();
+  }
 }
 
 async function main() {
@@ -780,6 +887,9 @@ async function main() {
     const afterLoginReport = options.afterLoginReport === true;
     const autoReport = options.autoReport ?? afterLoginReport;
     const notifyAutoSuccess = options.notifyAutoSuccess !== false;
+    const tryAutomatic = options.tryAutomatic !== false;
+    const repairIncidentId = options.repairIncidentId || null;
+    const reportResumeMode = options.reportResumeMode || "listener";
     const profileLock = await acquireLock("browser-profile", {
       waitMs: Number(process.env.BROWSER_LOCK_WAIT_MS || 10 * 60 * 1000),
       staleMs: Number(process.env.BROWSER_LOCK_STALE_MS || 30 * 60 * 1000),
@@ -793,12 +903,19 @@ async function main() {
         if (notifyAutoSuccess) {
           await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地当前登录正常。");
         }
+        if (autoReport) {
+          await selectReportRunner(reportResumeMode)();
+        }
         return "already-ok";
       }
       loginSession.afterLoginReport = afterLoginReport;
+      loginSession.repairIncidentId = repairIncidentId;
+      loginSession.reportResumeMode = reportResumeMode;
 
-      const autoLogin = await tryAutoZhimadiLogin(loginSession);
-      if (autoLogin.ok) {
+      const autoLogin = tryAutomatic
+        ? await tryAutoZhimadiLogin(loginSession)
+        : { outcome: "failed", reason: "manual-required" };
+      if (autoLogin.outcome === "success") {
         await closeLoginSession(loginSession);
         loginSession = null;
         if (notifyAutoSuccess) {
@@ -806,23 +923,48 @@ async function main() {
         }
         if (autoReport) {
           await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "正在重新生成月报。");
-          await runMonthlyReport();
+          await selectReportRunner(reportResumeMode)();
         }
         return "auto-ok";
       }
+      if (autoLogin.outcome === "fatal") {
+        throw new Error(autoLogin.error || autoLogin.reason || "芝麻地自动登录配置错误");
+      }
 
-      const screenshots = await captureZhimadiCaptcha(loginSession);
+      const screenshots = loginSession.captchaPath
+        ? {
+          screenshotPath: loginSession.screenshotPath,
+          captchaPath: loginSession.captchaPath,
+        }
+        : await captureZhimadiCaptcha(loginSession);
       loginSession.screenshotPath = screenshots.screenshotPath;
       loginSession.captchaPath = screenshots.captchaPath;
 
       await sendCaptchaImage(client, message, loginSession.captchaPath);
       loginSession.expireTimer = setTimeout(async () => {
         if (!loginSession) return;
+        const expiredIncidentId = loginSession.repairIncidentId;
         await closeLoginSession(loginSession);
         loginSession = null;
         running = false;
+        if (expiredIncidentId) {
+          const currentState = readJson(repairStatePath);
+          const nextState = markManualRepair(currentState, {
+            incidentId: expiredIncidentId,
+            outcome: "expired",
+          });
+          if (nextState !== currentState) writeJsonAtomic(repairStatePath, nextState);
+        }
       }, loginSessionTtlMs).unref();
-      await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "回复：验证码ABCD");
+      if (message.sessionWebhook) {
+        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "回复：验证码ABCD");
+      } else {
+        await sendDingTalkMarkdown(
+          "水果店登录验证码",
+          "### 水果店登录验证码\n\n自动修复持续 3 小时仍未恢复，请回复：验证码ABCD",
+          { alert: true },
+        );
+      }
       return "captcha-sent";
     } catch (error) {
       if (loginSession) await closeLoginSession(loginSession);
@@ -832,57 +974,104 @@ async function main() {
     }
   }
 
-  async function handleAutoRepairRequest() {
-    if (running || loginSession) return;
+  const autoRepairCoordinator = createZhimadiRepairCoordinator({
+    loadState: () => readJson(repairStatePath),
+    persistState: (state) => writeJsonAtomic(repairStatePath, state),
+    runAttempt: async () => {
+      running = true;
+      try {
+        return await runSilentZhimadiRepairAttempt();
+      } finally {
+        running = false;
+      }
+    },
+    escalate: async ({ incidentId, afterLoginReport, reportResumeMode }) => {
+      running = true;
+      try {
+        const result = await startZhimadiCaptchaFlow(loadGroupContext() || {}, {
+          afterLoginReport,
+          autoReport: false,
+          notifyAutoSuccess: false,
+          tryAutomatic: false,
+          repairIncidentId: incidentId,
+          reportResumeMode,
+        });
+        if (result === "captcha-sent") return { outcome: "captcha-sent" };
+        running = false;
+        return { outcome: "success" };
+      } catch (error) {
+        running = false;
+        throw error;
+      }
+    },
+  });
+  let autoRepairTickRunning = false;
 
+  async function resumeReportAfterRepair(state) {
+    if (state?.afterLoginReport !== true || state.reportResumeClaimedAt) return;
+    const requesterGraceMs = Number(process.env.ZHIMADI_REQUESTER_GRACE_MS || 4 * 60 * 1000);
+    const requesterOwnsResume = requesterCanResumeReport(state, {
+      isProcessRunning,
+      graceMs: requesterGraceMs,
+    });
+    const claimedState = {
+      ...state,
+      reportResumeClaimedAt: new Date().toISOString(),
+      reportResumeOwner: requesterOwnsResume ? "requester" : "listener",
+    };
+    writeJsonAtomic(repairStatePath, claimedState);
+    if (requesterOwnsResume) return;
+
+    running = true;
+    try {
+      await selectReportRunner(claimedState.reportResumeMode)();
+    } finally {
+      running = false;
+    }
+  }
+
+  async function handleAutoRepairRequest() {
+    if (running || loginSession || autoRepairTickRunning) return;
     const request = readJson(repairRequestPath);
     if (!request?.requestedAt) return;
 
-    const state = readJson(repairStatePath);
-    if (state?.handledRequestAt === request.requestedAt) return;
-
-    const context = loadGroupContext() || {};
-
-    running = true;
-    writeJson(repairStatePath, {
-      status: "starting",
-      handledRequestAt: request.requestedAt,
-      handledAt: new Date().toISOString(),
-    });
-
+    autoRepairTickRunning = true;
     try {
-      const result = await startZhimadiCaptchaFlow(context, {
-        afterLoginReport: request.afterLoginReport === true,
-        autoReport: false,
-        notifyAutoSuccess: false,
-      });
-      writeJson(repairStatePath, {
-        status: result,
-        handledRequestAt: request.requestedAt,
-        handledAt: new Date().toISOString(),
-      });
-      if (result !== "captcha-sent") running = false;
-    } catch (error) {
-      loginSession = null;
-      running = false;
-      writeJson(repairStatePath, {
-        status: "failed",
-        handledRequestAt: request.requestedAt,
-        handledAt: new Date().toISOString(),
-        error: error.message,
-      });
-      if (shouldSendZhimadiRepairFailureAlert(request)) {
+      const result = await autoRepairCoordinator.tick(request);
+      if (
+        result.outcome === "success"
+        || (
+          result.outcome === "inactive"
+          && ["already-ok", "auto-ok", "manual-ok", "observed-ok"].includes(result.status)
+        )
+      ) {
+        await resumeReportAfterRepair(result.state).catch((error) => {
+          console.error(`芝麻地恢复后续跑报表失败：${errorSummary(error)}`);
+        });
+      } else if (result.outcome === "fatal") {
         await sendDingTalkMarkdown(
           "水果店登录修复失败",
-          `### 水果店登录修复失败\n\n${error.message}`,
+          `### 水果店登录修复失败\n\n${result.state.lastFailure}`,
           { alert: true },
-        ).catch((sendError) => {
-          console.warn(`自动修复失败通知发送失败：${sendError.message}`);
+        ).catch((error) => {
+          console.warn(`自动修复失败通知发送失败：${error.message}`);
         });
-      } else {
-        console.warn("自动修复失败通知由健康检查统一处理");
       }
+    } finally {
+      autoRepairTickRunning = false;
     }
+  }
+
+  function persistManualRepairOutcome(incidentId, outcome, error) {
+    if (!incidentId) return null;
+    const currentState = readJson(repairStatePath);
+    const nextState = markManualRepair(currentState, {
+      incidentId,
+      outcome,
+      error,
+    });
+    if (nextState !== currentState) writeJsonAtomic(repairStatePath, nextState);
+    return nextState;
   }
 
   setInterval(() => {
@@ -915,15 +1104,20 @@ async function main() {
     const manualCaptchaCode = extractManualCaptchaCode(text);
     if (loginSession && manualCaptchaCode) {
       const code = manualCaptchaCode;
+      const repairIncidentId = loginSession.repairIncidentId;
       try {
         await submitZhimadiLoginCode(loginSession, code);
         const afterLoginReport = loginSession.afterLoginReport;
+        const reportResumeMode = loginSession.reportResumeMode;
         await closeLoginSession(loginSession);
         loginSession = null;
+        const repairedState = persistManualRepairOutcome(repairIncidentId, "ok");
         if (afterLoginReport) {
           await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "登录已恢复，继续生成月报。");
-          running = true;
-          runMonthlyReport()
+          const resumeReport = repairedState
+            ? () => resumeReportAfterRepair(repairedState)
+            : selectReportRunner(reportResumeMode);
+          resumeReport()
             .catch((error) => {
               console.error(error.stack || error.message);
             })
@@ -938,6 +1132,7 @@ async function main() {
         await closeLoginSession(loginSession);
         loginSession = null;
         running = false;
+        persistManualRepairOutcome(repairIncidentId, "failed", error.message);
         await sendSessionText(client, message.sessionWebhook, message.senderStaffId, `验证码失败：${error.message}`);
         console.error(error.stack || error.message);
       }
@@ -1003,13 +1198,27 @@ async function main() {
       }
 
       running = true;
+      const repairState = readJson(repairStatePath);
+      const repairIncidentId = activeIncidentId(repairState);
       try {
-        const result = await startZhimadiCaptchaFlow(message);
+        const result = await startZhimadiCaptchaFlow(message, {
+          repairIncidentId,
+          afterLoginReport: repairState?.afterLoginReport === true,
+          reportResumeMode: repairState?.reportResumeMode,
+          autoReport: repairIncidentId ? false : undefined,
+        });
+        if (result !== "captcha-sent") {
+          const repairedState = persistManualRepairOutcome(repairIncidentId, "ok");
+          if (repairedState?.afterLoginReport === true) {
+            await resumeReportAfterRepair(repairedState);
+          }
+        }
         if (result !== "captcha-sent") running = false;
       } catch (error) {
         await closeLoginSession(loginSession);
         loginSession = null;
         running = false;
+        persistManualRepairOutcome(repairIncidentId, "failed", error.message);
         console.error(error.stack || error.message);
         await sendSessionText(client, message.sessionWebhook, message.senderStaffId, `芝麻地登录修复启动失败：${error.message}`);
       }
@@ -1039,7 +1248,18 @@ async function main() {
       .catch(async (error) => {
         if (String(error.output || error.message).includes("芝麻地登录态失效")) {
           try {
-            await startZhimadiCaptchaFlow(message, { afterLoginReport: true });
+            const repairState = readJson(repairStatePath);
+            const repairIncidentId = activeIncidentId(repairState);
+            const result = await startZhimadiCaptchaFlow(message, {
+              afterLoginReport: true,
+              repairIncidentId,
+              reportResumeMode: repairState?.reportResumeMode || "listener",
+              autoReport: repairIncidentId ? false : true,
+            });
+            if (result !== "captcha-sent") {
+              const repairedState = persistManualRepairOutcome(repairIncidentId, "ok");
+              if (repairedState) await resumeReportAfterRepair(repairedState);
+            }
             return;
           } catch (loginError) {
             await closeLoginSession(loginSession);
@@ -1077,6 +1297,7 @@ if (require.main === module) {
 module.exports = {
   createDouyinSmsFlow,
   loadDouyinSmsTarget,
+  retryableZhimadiRepairError,
   saveDouyinSmsTarget,
-  shouldSendZhimadiRepairFailureAlert,
+  selectReportRunner,
 };

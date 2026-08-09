@@ -12,6 +12,11 @@ const { writeHealthFailure } = require("./healthcheck-error.cjs");
 
 const repairRequestPath = path.resolve("output/zhimadi-login-repair-request.json");
 const repairStatePath = path.resolve("output/zhimadi-login-repair-state.json");
+const deferredZhimadiRepairCodes = new Set([
+  "ZHIMADI_AUTO_RETRYING",
+  "ZHIMADI_CAPTCHA_SENT",
+  "ZHIMADI_REPAIR_DEFERRED",
+]);
 
 function loadEnv() {
   const envPath = path.resolve(".env");
@@ -119,6 +124,24 @@ function isZhimadiPageLoadError(error) {
     || message.includes("芝麻地报表刷新按钮未加载");
 }
 
+function isZhimadiRepairDeferredError(error) {
+  return deferredZhimadiRepairCodes.has(error?.code);
+}
+
+function isZhimadiRepairAlertOwnedError(error) {
+  return error?.code === "ZHIMADI_REPAIR_FATAL_ALERTED";
+}
+
+function currentReportResumeMode() {
+  if (process.env.REPORT_MANAGED_BY_SCHEDULED === "1") return "scheduled";
+  if (process.env.REPORT_MANAGED_BY_LISTENER === "1") return "listener";
+  return "direct";
+}
+
+function repairCanResumeInProcess(state, resumeMode = currentReportResumeMode()) {
+  return !state?.reportResumeMode || state.reportResumeMode === resumeMode;
+}
+
 async function waitForZhimadiRepair(requestedAt) {
   const timeoutMs = Number(process.env.ZHIMADI_AUTO_REPAIR_TIMEOUT_MS || 3 * 60 * 1000);
   const deadline = Date.now() + timeoutMs;
@@ -126,20 +149,41 @@ async function waitForZhimadiRepair(requestedAt) {
   while (Date.now() < deadline) {
     const state = readJson(repairStatePath);
     if (state?.handledRequestAt === requestedAt) {
-      if (["auto-ok", "already-ok"].includes(state.status)) return state;
+      if (["auto-ok", "already-ok", "manual-ok", "observed-ok"].includes(state.status)) {
+        if (repairCanResumeInProcess(state)) return state;
+        const error = new Error("芝麻地登录已恢复，报表将由原定时入口继续生成");
+        error.code = "ZHIMADI_REPAIR_DEFERRED";
+        throw error;
+      }
+      if (state.status === "auto-retrying") {
+        const error = new Error("芝麻地登录态失效，自动修复正在后台重试");
+        error.code = "ZHIMADI_AUTO_RETRYING";
+        throw error;
+      }
       if (state.status === "captcha-sent") {
         const error = new Error("芝麻地验证码已发送到钉钉，请回复：验证码ABCD");
         error.code = "ZHIMADI_CAPTCHA_SENT";
         throw error;
       }
-      if (state.status === "failed") {
-        throw new Error(`芝麻地自动登录修复失败：${state.error || "未知错误"}`);
+      if (["escalating", "escalation-failed", "manual-failed", "manual-expired"].includes(state.status)) {
+        const error = new Error("芝麻地登录态失效，自动修复已等待人工处理");
+        error.code = "ZHIMADI_REPAIR_DEFERRED";
+        throw error;
+      }
+      if (["failed", "fatal"].includes(state.status)) {
+        const error = new Error(`芝麻地自动登录修复失败：${state.lastFailure || state.error || "未知错误"}`);
+        if (state.status === "fatal" && state.fatalAlertAttemptedAt) {
+          error.code = "ZHIMADI_REPAIR_FATAL_ALERTED";
+        }
+        throw error;
       }
     }
     await delay(2000);
   }
 
-  throw new Error(`等待芝麻地自动登录修复超时 ${Math.round(timeoutMs / 1000)} 秒`);
+  const error = new Error(`等待芝麻地自动登录修复超时 ${Math.round(timeoutMs / 1000)} 秒`);
+  error.code = "ZHIMADI_REPAIR_DEFERRED";
+  throw error;
 }
 
 async function repairZhimadiLogin() {
@@ -149,6 +193,8 @@ async function repairZhimadiLogin() {
     requestedAt,
     reason: "report-login-expired",
     afterLoginReport: !previewOnly,
+    requesterPid: process.pid,
+    reportResumeMode: currentReportResumeMode(),
     ...(process.env.ZHIMADI_REPAIR_FAILURE_ALERT_OWNER
       ? { failureAlertOwner: process.env.ZHIMADI_REPAIR_FAILURE_ALERT_OWNER }
       : {}),
@@ -575,12 +621,20 @@ if (require.main === module) {
   main().catch(async (error) => {
     loadEnv();
     const failureAlertsEnabled = process.env.REPORT_FAILURE_ALERTS !== "false";
-    if (error.code !== "ZHIMADI_CAPTCHA_SENT" && failureAlertsEnabled) {
+    const repairDeferred = isZhimadiRepairDeferredError(error);
+    const repairAlertAlreadyOwned = isZhimadiRepairAlertOwnedError(error);
+    if (!repairDeferred && !repairAlertAlreadyOwned && failureAlertsEnabled) {
       const message = `### 水果店月度报表失败\n\n${error.message || error}`;
       await sendDingTalk(message, { alert: true }).catch(() => {});
     }
     console.error(error.stack || error.message);
     writeHealthFailure(error);
-    process.exit(error.code === "ZHIMADI_CAPTCHA_SENT" ? 2 : 1);
+    process.exit(repairDeferred ? 2 : 1);
   });
 }
+
+module.exports = {
+  isZhimadiRepairAlertOwnedError,
+  isZhimadiRepairDeferredError,
+  repairCanResumeInProcess,
+};

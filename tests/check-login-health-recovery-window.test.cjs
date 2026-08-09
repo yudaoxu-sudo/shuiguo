@@ -4,12 +4,31 @@ const test = require("node:test");
 const {
   checkLoginHealth,
   createLoginProbe,
+  persistObservedZhimadiRecovery,
 } = require("../scripts/check-login-health.cjs");
 const {
   checkReportHealth,
 } = require("../scripts/check-report-health.cjs");
 
 const baseNow = Date.parse("2026-07-30T04:00:00.000Z");
+
+test("a healthy Zhimadi observation resolves the persisted repair incident", () => {
+  let state = {
+    status: "manual-expired",
+    incidentId: "incident-1",
+    incidentStartedAt: "2026-07-30T01:00:00.000Z",
+    deadlineAt: "2026-07-30T04:00:00.000Z",
+  };
+  persistObservedZhimadiRecovery(
+    baseNow,
+    () => state,
+    (nextState) => {
+      state = nextState;
+    },
+  );
+  assert.equal(state.status, "observed-ok");
+  assert.equal(state.completedAt, "2026-07-30T04:00:00.000Z");
+});
 
 function createHarness(outcomes, initialState = null) {
   const harness = {

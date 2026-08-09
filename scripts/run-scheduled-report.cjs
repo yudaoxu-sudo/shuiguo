@@ -3,7 +3,12 @@ const path = require("path");
 const { spawn } = require("child_process");
 const { withLock } = require("./runtime-lock.cjs");
 const { loadEnv, sendDingTalkMarkdown } = require("./send-dingtalk.cjs");
-const { markReportHealthOk } = require("./check-report-health.cjs");
+const {
+  classifyReportFailure,
+  deferZhimadiHealthFailure,
+  markReportHealthOk,
+} = require("./check-report-health.cjs");
+const { extractHealthFailure } = require("./healthcheck-error.cjs");
 
 const statePath = path.resolve("output/scheduled-report-state.json");
 
@@ -38,7 +43,9 @@ function runReport(scriptPath = "scripts/daily-report.cjs") {
       cwd: process.cwd(),
       env: {
         ...process.env,
+        HEALTHCHECK_PREVIEW: "1",
         REPORT_FAILURE_ALERTS: "false",
+        REPORT_MANAGED_BY_SCHEDULED: "1",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -57,6 +64,14 @@ function runReport(scriptPath = "scripts/daily-report.cjs") {
     child.once("error", reject);
     child.once("close", (code) => resolve({ code: code ?? 1, outputTail }));
   });
+}
+
+function scheduledZhimadiDeferral(message, loadRepairState) {
+  const failure = classifyReportFailure(message);
+  return deferZhimadiHealthFailure(
+    { failure, message },
+    loadRepairState,
+  );
 }
 
 async function main() {
@@ -100,22 +115,31 @@ async function main() {
       return;
     }
 
-    const message = result.outputTail.trim().slice(-1200);
+    const message = (
+      extractHealthFailure(result.outputTail)
+      || result.outputTail.trim()
+    ).slice(-1200);
+    const loginDeferral = scheduledZhimadiDeferral(message);
     writeJson(statePath, {
       date,
-      status: "failed",
+      status: loginDeferral ? "deferred-login-repair" : "failed",
       attempts,
       lastFailedAt: new Date().toISOString(),
       exitCode: result.code,
       message,
     });
 
-    if (process.env.SCHEDULED_REPORT_FINAL_ATTEMPT === "1") {
+    if (
+      process.env.SCHEDULED_REPORT_FINAL_ATTEMPT === "1"
+      && !loginDeferral
+    ) {
       await sendDingTalkMarkdown(
         "水果店月度报表最终失败",
         `### 水果店月度报表最终失败\n\n今晚已自动补跑 ${attempts} 次，仍未成功。\n\n${message}`,
         { alert: true },
       );
+    } else if (loginDeferral) {
+      console.log("scheduled-report-login-repair-deferred");
     }
 
     process.exitCode = result.code;
@@ -136,3 +160,5 @@ if (require.main === module) {
     process.exit(1);
   });
 }
+
+module.exports = { scheduledZhimadiDeferral };

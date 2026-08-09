@@ -3,6 +3,7 @@ const path = require("path");
 const { chromium } = require("playwright");
 const {
   checkReportHealth,
+  deferZhimadiHealthFailure,
   readJson,
   runNodePreview,
   writeJson,
@@ -20,6 +21,9 @@ const {
 const { loadEnv } = require("./send-dingtalk.cjs");
 const { withLock } = require("./runtime-lock.cjs");
 const { gotoZhimadi, isZhimadiAuthenticated } = require("./zhimadi-navigation.cjs");
+const {
+  markObservedZhimadiRecovery,
+} = require("./zhimadi-repair-coordinator.cjs");
 
 const statePath = path.resolve("output/login-health-state.json");
 const repairRequestPath = path.resolve("output/zhimadi-login-repair-request.json");
@@ -37,6 +41,17 @@ function configuredDuration(name, fallback) {
 function chromeExecutablePath() {
   if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
   return undefined;
+}
+
+function persistObservedZhimadiRecovery(
+  now = Date.now(),
+  loadState = () => readJson(repairStatePath),
+  persist = (state) => writeJson(repairStatePath, state),
+) {
+  const currentState = loadState();
+  const nextState = markObservedZhimadiRecovery(currentState, now);
+  if (nextState !== currentState) persist(nextState);
+  return nextState;
 }
 
 async function zhimadiOk(page) {
@@ -81,6 +96,7 @@ async function inspectLogins(timeoutMs) {
     try {
       try {
         if (!(await zhimadiOk(page))) problems.push("芝麻地登录态失效");
+        else persistObservedZhimadiRecovery();
       } catch (error) {
         problems.push(`芝麻地登录检查失败：${error.message || error}`);
       }
@@ -208,6 +224,7 @@ async function checkLoginHealth(options = {}) {
     isSharedProblem: options.isSharedProblem || isSharedHealthProblem,
     resolveAlert: options.resolveAlert || resolveHealthAlert,
     verifiedProblemKeys: options.verifiedProblemKeys || verifiedLoginProbeKeys,
+    deferFailure: options.deferFailure || (async () => null),
     recoveryWindowMs: options.recoveryWindowMs ?? configuredDuration(
       "HEALTH_RECOVERY_WINDOW_MS",
       defaultRecoveryWindowMs,
@@ -243,7 +260,9 @@ async function main() {
       waitMs: 5000,
       staleMs: 45 * 60 * 1000,
     }, async () => {
-      const result = await checkLoginHealth();
+      const result = await checkLoginHealth({
+        deferFailure: deferZhimadiHealthFailure,
+      });
       if (result.status === "failed") process.exitCode = 1;
     });
   } catch (error) {
@@ -269,5 +288,6 @@ module.exports = {
   classifyLoginFailure,
   createLoginProbe,
   inspectLogins,
+  persistObservedZhimadiRecovery,
   runLoginInspection,
 };

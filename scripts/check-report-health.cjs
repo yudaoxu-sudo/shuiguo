@@ -14,8 +14,10 @@ const {
   finalHealthFailureMessage,
 } = require("./healthcheck-error.cjs");
 const { withLock } = require("./runtime-lock.cjs");
+const { zhimadiRepairDeferral } = require("./zhimadi-repair-coordinator.cjs");
 
 const statePath = path.resolve("output/report-health-state.json");
+const zhimadiRepairStatePath = path.resolve("output/zhimadi-login-repair-state.json");
 const defaultPreviewTimeoutMs = 10 * 60 * 1000;
 const defaultFinalVerificationTimeoutMs = 2 * 60 * 1000;
 const defaultRecoveryWindowMs = 20 * 60 * 1000;
@@ -65,6 +67,29 @@ function writeJson(filePath, data) {
   }
 }
 
+function deferZhimadiHealthFailure(
+  { failure, message },
+  loadRepairState = () => readJson(zhimadiRepairStatePath),
+) {
+  const details = zhimadiRepairDeferral(loadRepairState(), {
+    problemKey: failure?.problemKey,
+    message,
+  });
+  if (!details) return null;
+
+  return {
+    active: true,
+    waitingForHuman: details.phase === "prompted",
+    reason: details.phase === "prompted"
+      ? "zhimadi-human-prompt"
+      : "zhimadi-auto-repair",
+    incidentId: details.incidentId,
+    startedAt: details.incidentStartedAt,
+    until: details.deadlineAt,
+    promptSentAt: details.promptSentAt,
+  };
+}
+
 function markReportHealthOk(
   checkedAt = new Date().toISOString(),
   persist = (state) => writeJson(statePath, state),
@@ -107,6 +132,7 @@ function classifyReportFailure(message) {
   if (
     text.includes("芝麻地登录态失效")
     || text.includes("等待芝麻地自动登录修复")
+    || text.includes("芝麻地自动登录正在后台重试")
     || text.includes("芝麻地自动登录修复失败")
   ) {
     return { problemKey: "zhimadi-login", retryable: true };
@@ -325,6 +351,7 @@ async function checkReportHealth(options = {}) {
     isSharedProblem = () => false,
     resolveAlert = async () => {},
     verifiedProblemKeys = verifiedLoginKeys,
+    deferFailure = async () => null,
     recoveryWindowMs = configuredDuration(
       "HEALTH_RECOVERY_WINDOW_MS",
       defaultRecoveryWindowMs,
@@ -428,6 +455,68 @@ async function checkReportHealth(options = {}) {
         resolveAlert,
         log,
       );
+
+      const deferral = await deferFailure({
+        failure,
+        message,
+        failedAt,
+        checkedAt,
+      });
+      if (deferral?.active) {
+        const configuredStartedAt = Date.parse(deferral.startedAt || "");
+        const startedAt = Number.isFinite(configuredStartedAt)
+          && configuredStartedAt <= failedAt
+          ? configuredStartedAt
+          : failedAt;
+        const configuredDeadline = Date.parse(deferral.until || "");
+        const deadline = Number.isFinite(configuredDeadline)
+          && configuredDeadline >= startedAt
+          ? configuredDeadline
+          : Math.max(failedAt, startedAt + recoveryWindowMs);
+
+        const deferralIncidentId = deferral.incidentId
+          || new Date(startedAt).toISOString();
+        if (
+          !incident
+          || incident.problemKey !== failure.problemKey
+          || incident.id !== deferralIncidentId
+        ) {
+          incident = {
+            id: deferralIncidentId,
+            problemKey: failure.problemKey,
+            startedAt,
+            deadline,
+          };
+        } else {
+          incident.deadline = Math.max(incident.deadline, deadline);
+        }
+        recoveryCeiling = incident.deadline;
+
+        persist(incidentState(
+          deferral.waitingForHuman ? "waiting-login-captcha" : "recovering",
+          incident,
+          checkedAt,
+          attempt,
+          message,
+          {
+            ...(deadline > failedAt
+              ? { nextRetryAt: new Date(deadline).toISOString() }
+              : {}),
+            ...(deferral.promptSentAt
+              ? { captchaPromptSentAt: deferral.promptSentAt }
+              : {}),
+            deferredBy: deferral.reason || "external-recovery",
+            ...existingAlert(state, incident.id),
+          },
+        ));
+        log(`${logPrefix}-deferred: ${deferral.reason || "external-recovery"}`);
+        return {
+          status: "recovering",
+          attempts: attempt,
+          alerted: false,
+          deferred: true,
+        };
+      }
 
       if (!incident || incident.problemKey !== failure.problemKey) {
         const persistedIncident = sharedRecovered
@@ -619,6 +708,7 @@ async function main() {
         getSharedAlertState: getHealthAlertState,
         isSharedProblem: isSharedHealthProblem,
         resolveAlert: resolveHealthAlert,
+        deferFailure: deferZhimadiHealthFailure,
       });
       if (result.status === "failed") process.exitCode = 1;
     });
@@ -642,6 +732,7 @@ module.exports = {
   activeIncidentStartedAt,
   checkReportHealth,
   classifyReportFailure,
+  deferZhimadiHealthFailure,
   markReportHealthOk,
   readJson,
   runNodePreview,

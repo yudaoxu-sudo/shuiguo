@@ -6,15 +6,71 @@ const test = require("node:test");
 
 const {
   checkReportHealth,
+  deferZhimadiHealthFailure,
   markReportHealthOk,
   runNodePreview,
 } = require("../scripts/check-report-health.cjs");
 const {
-  shouldSendZhimadiRepairFailureAlert,
-} = require("../scripts/listen-dingtalk.cjs");
+  scheduledZhimadiDeferral,
+} = require("../scripts/run-scheduled-report.cjs");
 
 const baseNow = Date.parse("2026-07-30T04:00:00.000Z");
 const silent = () => {};
+
+test("Zhimadi repair deferral excludes combined Lemeng login failures", () => {
+  const repairState = {
+    status: "auto-retrying",
+    incidentId: "repair-1",
+    incidentStartedAt: "2026-07-30T03:00:00.000Z",
+    deadlineAt: "2026-07-30T06:00:00.000Z",
+  };
+  const loadRepairState = () => repairState;
+
+  assert.equal(deferZhimadiHealthFailure({
+    failure: { problemKey: "zhimadi-login" },
+    message: "登录态异常：芝麻地登录态失效；乐檬登录态失效",
+  }, loadRepairState), null);
+  assert.equal(deferZhimadiHealthFailure({
+    failure: { problemKey: "zhimadi-login" },
+    message: "芝麻地登录态失效；抖音报表加载失败",
+  }, loadRepairState), null);
+
+  assert.deepEqual(deferZhimadiHealthFailure({
+    failure: { problemKey: "zhimadi-login" },
+    message: "登录态异常：芝麻地登录态失效",
+  }, loadRepairState), {
+    active: true,
+    waitingForHuman: false,
+    reason: "zhimadi-auto-repair",
+    incidentId: "repair-1",
+    startedAt: "2026-07-30T03:00:00.000Z",
+    until: "2026-07-30T06:00:00.000Z",
+    promptSentAt: null,
+  });
+});
+
+test("scheduled final alerts defer only the matching active Zhimadi login incident", () => {
+  const repairState = {
+    status: "auto-retrying",
+    incidentId: "repair-1",
+    incidentStartedAt: "2026-07-30T03:00:00.000Z",
+    deadlineAt: "2026-07-30T06:00:00.000Z",
+  };
+  const loadRepairState = () => repairState;
+
+  assert.ok(scheduledZhimadiDeferral(
+    "芝麻地自动登录正在后台重试",
+    loadRepairState,
+  ));
+  assert.equal(scheduledZhimadiDeferral(
+    "抖音报表加载超时",
+    loadRepairState,
+  ), null);
+  assert.equal(scheduledZhimadiDeferral(
+    "TypeError: report builder invariant failed",
+    loadRepairState,
+  ), null);
+});
 
 test("a scheduled report can mark report health healthy at its proof time", () => {
   let state;
@@ -137,6 +193,86 @@ test("transient precheck failure recovers inside twenty minutes without an alert
   assert.equal(harness.writes[0].status, "recovering");
   assert.equal(harness.state.status, "ok");
   assert.deepEqual(harness.sleeps, [60 * 1000]);
+});
+
+test("an external Zhimadi repair incident defers the health alert without a long-lived sleep", async () => {
+  const harness = createHarness([
+    { error: "报表预检退出码 1：芝麻地自动登录正在后台重试" },
+  ]);
+  const startedAt = new Date(baseNow - 60 * 60 * 1000).toISOString();
+  const deadlineAt = new Date(baseNow + 2 * 60 * 60 * 1000).toISOString();
+
+  const result = await checkReportHealth({
+    ...harness.options,
+    deferFailure: async ({ failure }) => ({
+      active: failure.problemKey === "zhimadi-login",
+      reason: "zhimadi-auto-repair",
+      incidentId: startedAt,
+      startedAt,
+      until: deadlineAt,
+    }),
+  });
+
+  assert.equal(result.status, "recovering");
+  assert.equal(result.deferred, true);
+  assert.equal(harness.attempts, 1);
+  assert.equal(harness.sends.length, 0);
+  assert.deepEqual(harness.sleeps, []);
+  assert.equal(harness.state.status, "recovering");
+  assert.equal(harness.state.incidentStartedAt, startedAt);
+  assert.equal(harness.state.recoveryDeadlineAt, deadlineAt);
+  assert.equal(harness.state.deferredBy, "zhimadi-auto-repair");
+});
+
+test("a delivered Zhimadi captcha prompt suppresses duplicate health alerts", async () => {
+  const harness = createHarness([
+    { error: "报表预检退出码 1：芝麻地验证码已发送到钉钉" },
+  ]);
+  const promptSentAt = new Date(baseNow - 1000).toISOString();
+
+  const result = await checkReportHealth({
+    ...harness.options,
+    recoveryWindowMs: 0,
+    deferFailure: async () => ({
+      active: true,
+      waitingForHuman: true,
+      reason: "zhimadi-human-prompt",
+      promptSentAt,
+    }),
+  });
+
+  assert.equal(result.status, "recovering");
+  assert.equal(harness.sends.length, 0);
+  assert.equal(harness.state.status, "waiting-login-captcha");
+  assert.equal(harness.state.captchaPromptSentAt, promptSentAt);
+});
+
+test("a new external repair incident does not inherit an older Zhimadi incident id", async () => {
+  const oldIncidentAt = new Date(baseNow - 4 * 60 * 60 * 1000).toISOString();
+  const newIncidentAt = new Date(baseNow - 60 * 1000).toISOString();
+  const harness = createHarness([
+    { error: "报表预检退出码 1：芝麻地自动登录正在后台重试" },
+  ], {
+    status: "recovering",
+    incidentId: oldIncidentAt,
+    problemKey: "zhimadi-login",
+    incidentStartedAt: oldIncidentAt,
+    recoveryDeadlineAt: new Date(baseNow + 10 * 60 * 1000).toISOString(),
+  });
+
+  await checkReportHealth({
+    ...harness.options,
+    deferFailure: async () => ({
+      active: true,
+      reason: "zhimadi-auto-repair",
+      incidentId: newIncidentAt,
+      startedAt: newIncidentAt,
+      until: new Date(baseNow + 3 * 60 * 60 * 1000).toISOString(),
+    }),
+  });
+
+  assert.equal(harness.state.incidentId, newIncidentAt);
+  assert.equal(harness.state.incidentStartedAt, newIncidentAt);
 });
 
 test("persistent failure alerts once after the twenty minute recovery window", async () => {
@@ -631,21 +767,7 @@ test("a downstream failure resolves login claims verified by that probe", async 
   ]);
 });
 
-test("report-healthcheck owned repair failures do not trigger a listener alert", () => {
-  assert.equal(
-    shouldSendZhimadiRepairFailureAlert({
-      failureAlertOwner: "report-healthcheck",
-    }),
-    false,
-  );
-  assert.equal(
-    shouldSendZhimadiRepairFailureAlert({
-      failureAlertOwner: "login-healthcheck",
-    }),
-    false,
-  );
-  assert.equal(shouldSendZhimadiRepairFailureAlert({}), true);
-
+test("report health requests identify their alert owner", () => {
   const dailyReportSource = fs.readFileSync(
     path.resolve(__dirname, "../scripts/daily-report.cjs"),
     "utf8",

@@ -6,7 +6,7 @@
 # 每 5 分钟检查一次钉钉监听是否还活着；监听死掉会推送告警
 */5 * * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm healthcheck >> output/cron-healthcheck.log 2>&1
 
-# 每 2 小时检查一次后台登录态；芝麻地过期会直接触发验证码
+# 每 2 小时检查一次后台登录态；芝麻地过期会触发后台静默自动修复
 7 */2 * * * ubuntu cd /opt/fruit-store-report-bot && /usr/bin/pnpm login-healthcheck >> output/cron-login-healthcheck.log 2>&1
 
 # 白天做报表预检，只验证抓取能力，不推送正式报表；失败会推送告警
