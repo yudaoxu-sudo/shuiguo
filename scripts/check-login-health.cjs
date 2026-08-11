@@ -222,10 +222,10 @@ async function checkLoginHealth(options = {}) {
       `### 水果店登录态异常\n\n${recoveryText}\n\n${message}`,
     logPrefix: "login",
     alertSource: "login-healthcheck",
-    claimAlert: options.claimAlert || claimHealthAlert,
-    getSharedAlertState: options.getSharedAlertState || getHealthAlertState,
-    isSharedProblem: options.isSharedProblem || isSharedHealthProblem,
-    resolveAlert: options.resolveAlert || resolveHealthAlert,
+    claimAlert: options.claimAlert || (async () => true),
+    getSharedAlertState: options.getSharedAlertState || (async () => null),
+    isSharedProblem: options.isSharedProblem || (() => false),
+    resolveAlert: options.resolveAlert || (async () => {}),
     verifiedProblemKeys: options.verifiedProblemKeys || verifiedLoginProbeKeys,
     deferFailure: options.deferFailure || (async () => null),
     recoveryWindowMs: options.recoveryWindowMs ?? configuredDuration(
@@ -264,6 +264,10 @@ async function main() {
       staleMs: 45 * 60 * 1000,
     }, async () => {
       const result = await checkLoginHealth({
+        claimAlert: claimHealthAlert,
+        getSharedAlertState: getHealthAlertState,
+        isSharedProblem: isSharedHealthProblem,
+        resolveAlert: resolveHealthAlert,
         deferFailure: deferZhimadiHealthFailure,
         isIncidentResolved: isZhimadiRepairIncidentResolved,
       });
