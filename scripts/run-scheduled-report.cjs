@@ -9,16 +9,15 @@ const {
   markReportHealthOk,
 } = require("./check-report-health.cjs");
 const { extractHealthFailure } = require("./healthcheck-error.cjs");
+const {
+  assertCurrentReportTargetDate,
+  createReportTargetDateGuard,
+  resolveReportTargetDate,
+  runGuardedAction,
+  todayText,
+} = require("./report-target-date.cjs");
 
 const statePath = path.resolve("output/scheduled-report-state.json");
-
-function todayText() {
-  const now = new Date();
-  const yyyy = now.getFullYear();
-  const mm = String(now.getMonth() + 1).padStart(2, "0");
-  const dd = String(now.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
-}
 
 function readJson(filePath) {
   try {
@@ -37,7 +36,31 @@ function appendTail(current, chunk, limit = 4000) {
   return `${current}${chunk}`.slice(-limit);
 }
 
-function runReport(scriptPath = "scripts/daily-report.cjs") {
+function stopChildProcessGroup(child, signal) {
+  if (!child?.pid) return;
+  try {
+    if (process.platform === "win32") child.kill(signal);
+    else process.kill(-child.pid, signal);
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {
+      // The child already exited.
+    }
+  }
+}
+
+function runReport(
+  scriptPath = "scripts/daily-report.cjs",
+  reportDate = todayText(),
+  {
+    timeoutMs = Number(process.env.SCHEDULED_REPORT_TIMEOUT_MS || 15 * 60 * 1000),
+    killGraceMs = 5000,
+  } = {},
+) {
+  const boundedTimeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? timeoutMs
+    : 15 * 60 * 1000;
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [scriptPath], {
       cwd: process.cwd(),
@@ -46,11 +69,22 @@ function runReport(scriptPath = "scripts/daily-report.cjs") {
         HEALTHCHECK_PREVIEW: "1",
         REPORT_FAILURE_ALERTS: "false",
         REPORT_MANAGED_BY_SCHEDULED: "1",
+        REPORT_TARGET_DATE: reportDate,
       },
       stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
     });
 
     let outputTail = "";
+    let timedOut = false;
+    let killTimer;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      stopChildProcessGroup(child, "SIGTERM");
+      killTimer = setTimeout(() => {
+        stopChildProcessGroup(child, "SIGKILL");
+      }, killGraceMs);
+    }, boundedTimeoutMs);
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString();
       process.stdout.write(text);
@@ -61,8 +95,26 @@ function runReport(scriptPath = "scripts/daily-report.cjs") {
       process.stderr.write(text);
       outputTail = appendTail(outputTail, text);
     });
-    child.once("error", reject);
-    child.once("close", (code) => resolve({ code: code ?? 1, outputTail }));
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      if (killTimer) clearTimeout(killTimer);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timeout);
+      if (killTimer) clearTimeout(killTimer);
+      if (timedOut) {
+        resolve({
+          code: 1,
+          outputTail: appendTail(
+            outputTail,
+            `\n定时报表子进程超时 ${Math.round(boundedTimeoutMs / 1000)} 秒`,
+          ),
+        });
+      } else {
+        resolve({ code: code ?? 1, outputTail });
+      }
+    });
   });
 }
 
@@ -74,9 +126,19 @@ function scheduledZhimadiDeferral(message, loadRepairState) {
   );
 }
 
+function scheduledLoginDeferral(result, message, loadRepairState) {
+  if (Number(result?.code) === 2) {
+    return { phase: "child-deferred-login-repair" };
+  }
+  return scheduledZhimadiDeferral(message, loadRepairState);
+}
+
 async function main() {
   loadEnv();
-  const date = todayText();
+  const date = resolveReportTargetDate(process.env.REPORT_TARGET_DATE);
+  const guardReportDate = createReportTargetDateGuard(date, {
+    label: "正式定时报表",
+  });
 
   await withLock("scheduled-report", {
     waitMs: 5000,
@@ -101,8 +163,13 @@ async function main() {
     const scriptPath = dualReportDate === date
       ? "scripts/send-dual-douyin-report.cjs"
       : "scripts/daily-report.cjs";
-    const result = await runReport(scriptPath);
+    const result = await runGuardedAction(
+      guardReportDate,
+      "抓取前",
+      () => runReport(scriptPath, date),
+    );
     if (result.code === 0) {
+      guardReportDate("成功状态写入前");
       const sentAt = new Date().toISOString();
       writeJson(statePath, {
         date,
@@ -119,7 +186,7 @@ async function main() {
       extractHealthFailure(result.outputTail)
       || result.outputTail.trim()
     ).slice(-1200);
-    const loginDeferral = scheduledZhimadiDeferral(message);
+    const loginDeferral = scheduledLoginDeferral(result, message);
     writeJson(statePath, {
       date,
       status: loginDeferral ? "deferred-login-repair" : "failed",
@@ -161,4 +228,10 @@ if (require.main === module) {
   });
 }
 
-module.exports = { scheduledZhimadiDeferral };
+module.exports = {
+  assertCurrentReportTargetDate,
+  resolveReportTargetDate,
+  runReport,
+  scheduledLoginDeferral,
+  scheduledZhimadiDeferral,
+};

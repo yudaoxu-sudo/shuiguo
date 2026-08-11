@@ -29,6 +29,12 @@ const activeIncidentStatuses = new Set([
   "alert-unknown",
   "failed",
 ]);
+const resolvedZhimadiRepairStatuses = new Set([
+  "already-ok",
+  "auto-ok",
+  "manual-ok",
+  "observed-ok",
+]);
 
 function configuredDuration(name, fallback) {
   const value = Number(process.env[name]);
@@ -88,6 +94,24 @@ function deferZhimadiHealthFailure(
     until: details.deadlineAt,
     promptSentAt: details.promptSentAt,
   };
+}
+
+function isZhimadiRepairIncidentResolved(
+  { incident },
+  loadRepairState = () => readJson(zhimadiRepairStatePath),
+) {
+  if (incident?.problemKey !== "zhimadi-login") return false;
+  const repairState = loadRepairState();
+  if (!resolvedZhimadiRepairStatuses.has(repairState?.status)) return false;
+
+  const completedAt = Date.parse(
+    repairState.completedAt
+      || repairState.lastAttemptAt
+      || repairState.handledAt
+      || repairState.updatedAt
+      || "",
+  );
+  return Number.isFinite(completedAt) && completedAt >= incident.startedAt;
 }
 
 function markReportHealthOk(
@@ -352,6 +376,7 @@ async function checkReportHealth(options = {}) {
     resolveAlert = async () => {},
     verifiedProblemKeys = verifiedLoginKeys,
     deferFailure = async () => null,
+    isIncidentResolved = async () => false,
     recoveryWindowMs = configuredDuration(
       "HEALTH_RECOVERY_WINDOW_MS",
       defaultRecoveryWindowMs,
@@ -382,13 +407,23 @@ async function checkReportHealth(options = {}) {
     && !initialState?.lastAlertAttemptAt
     ? incident.deadline
     : null;
+  let resolvedIncidentId = null;
   let attempt = 0;
 
   while (true) {
     attempt += 1;
     const attemptStartedAt = now();
+    if (incident && await isIncidentResolved({
+      incident,
+      checkedAt: attemptStartedAt,
+    })) {
+      resolvedIncidentId = incident.id;
+      incident = null;
+      recoveryCeiling = null;
+    }
     const remainingMs = incident ? incident.deadline - attemptStartedAt : null;
-    const finalVerification = remainingMs !== null && remainingMs <= 0;
+    const finalVerification = remainingMs !== null
+      && remainingMs <= finalVerificationTimeoutMs;
     const timeoutMs = finalVerification
       ? Math.max(1, Math.min(previewTimeoutMs, finalVerificationTimeoutMs))
       : remainingMs === null
@@ -520,6 +555,7 @@ async function checkReportHealth(options = {}) {
 
       if (!incident || incident.problemKey !== failure.problemKey) {
         const persistedIncident = sharedRecovered
+          || state?.incidentId === resolvedIncidentId
           ? null
           : incidentFromState(
             state,
@@ -709,6 +745,7 @@ async function main() {
         isSharedProblem: isSharedHealthProblem,
         resolveAlert: resolveHealthAlert,
         deferFailure: deferZhimadiHealthFailure,
+        isIncidentResolved: isZhimadiRepairIncidentResolved,
       });
       if (result.status === "failed") process.exitCode = 1;
     });
@@ -733,6 +770,7 @@ module.exports = {
   checkReportHealth,
   classifyReportFailure,
   deferZhimadiHealthFailure,
+  isZhimadiRepairIncidentResolved,
   markReportHealthOk,
   readJson,
   runNodePreview,

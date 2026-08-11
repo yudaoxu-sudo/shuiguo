@@ -9,8 +9,17 @@ const { archiveMonthlyReport } = require("./report-history.cjs");
 const { withLock } = require("./runtime-lock.cjs");
 const { gotoZhimadi } = require("./zhimadi-navigation.cjs");
 const { writeHealthFailure } = require("./healthcheck-error.cjs");
+const { requestTimeoutSignal } = require("./send-dingtalk.cjs");
+const {
+  persistMergedRepairRequest,
+} = require("./zhimadi-repair-request.cjs");
+const {
+  createReportTargetDateGuard,
+  resolveReportTargetDate,
+  runGuardedAction,
+  shouldGuardFormalReportTarget,
+} = require("./report-target-date.cjs");
 
-const repairRequestPath = path.resolve("output/zhimadi-login-repair-request.json");
 const repairStatePath = path.resolve("output/zhimadi-login-repair-state.json");
 const deferredZhimadiRepairCodes = new Set([
   "ZHIMADI_AUTO_RETRYING",
@@ -33,8 +42,7 @@ function loadEnv() {
   }
 }
 
-function todayText() {
-  const now = new Date();
+function todayText(now = new Date()) {
   const yyyy = now.getFullYear();
   const mm = String(now.getMonth() + 1).padStart(2, "0");
   const dd = String(now.getDate()).padStart(2, "0");
@@ -105,8 +113,19 @@ function readJson(filePath) {
 }
 
 function writeJson(filePath, data) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+  const directory = path.dirname(filePath);
+  fs.mkdirSync(directory, { recursive: true });
+  const tempPath = path.join(
+    directory,
+    `${path.basename(filePath)}.${process.pid}.${crypto.randomUUID()}.tmp`,
+  );
+  try {
+    fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), { mode: 0o600 });
+    fs.renameSync(tempPath, filePath);
+  } catch (error) {
+    fs.rmSync(tempPath, { force: true });
+    throw error;
+  }
 }
 
 function isZhimadiLoginError(error) {
@@ -140,6 +159,11 @@ function currentReportResumeMode() {
 
 function repairCanResumeInProcess(state, resumeMode = currentReportResumeMode()) {
   return !state?.reportResumeMode || state.reportResumeMode === resumeMode;
+}
+
+function shouldRequestReportAfterLogin(env = process.env) {
+  const noDingTalk = env.NO_DINGTALK === "1" || env.NO_DINGTALK === "true";
+  return !noDingTalk || env.REPORT_FORMAL_WRAPPER === "1";
 }
 
 async function waitForZhimadiRepair(requestedAt) {
@@ -186,21 +210,74 @@ async function waitForZhimadiRepair(requestedAt) {
   throw error;
 }
 
-async function repairZhimadiLogin() {
+async function repairZhimadiLogin({ deferToListener = false } = {}) {
   const requestedAt = new Date().toISOString();
-  const previewOnly = process.env.NO_DINGTALK === "1" || process.env.NO_DINGTALK === "true";
-  writeJson(repairRequestPath, {
+  const reportResumeMode = currentReportResumeMode();
+  const afterLoginReport = shouldRequestReportAfterLogin();
+  const persistedRequest = await persistMergedRepairRequest({
     requestedAt,
     reason: "report-login-expired",
-    afterLoginReport: !previewOnly,
-    requesterPid: process.pid,
-    reportResumeMode: currentReportResumeMode(),
+    afterLoginReport,
+    requesterPid: deferToListener ? null : process.pid,
+    reportResumeMode,
+    ...(afterLoginReport
+      ? { reportDate: process.env.REPORT_TARGET_DATE || todayText(new Date(requestedAt)) }
+      : {}),
     ...(process.env.ZHIMADI_REPAIR_FAILURE_ALERT_OWNER
       ? { failureAlertOwner: process.env.ZHIMADI_REPAIR_FAILURE_ALERT_OWNER }
       : {}),
   });
   console.warn("检测到芝麻地登录态失效，正在触发自动登录修复");
-  return waitForZhimadiRepair(requestedAt);
+  if (deferToListener) {
+    const error = new Error("芝麻地登录态失效，自动修复已交由后台继续");
+    error.code = "ZHIMADI_REPAIR_DEFERRED";
+    throw error;
+  }
+  return waitForZhimadiRepair(persistedRequest.requestedAt);
+}
+
+function persistRequesterReportResumeOutcome(repairState, outcome, error, {
+  loadState = () => readJson(repairStatePath),
+  persistState = (state) => writeJson(repairStatePath, state),
+  now = Date.now,
+  requesterPid = process.pid,
+} = {}) {
+  const currentState = loadState();
+  if (
+    !repairState?.incidentId
+    || currentState?.incidentId !== repairState.incidentId
+    || currentState?.reportRequestedAt !== repairState.reportRequestedAt
+    || Number(currentState?.requesterPid) !== requesterPid
+  ) {
+    return;
+  }
+
+  const currentTime = now();
+  const updatedAt = new Date(currentTime).toISOString();
+  const nextState = { ...currentState, updatedAt };
+  for (const key of [
+    "reportResumeClaimId",
+    "reportResumeClaimedAt",
+    "reportResumeOwner",
+    "reportResumeOwnerPid",
+    "reportResumeLeaseUntil",
+  ]) {
+    delete nextState[key];
+  }
+  if (outcome === "success") {
+    nextState.afterLoginReport = false;
+    nextState.reportResumeCompletedAt = updatedAt;
+    delete nextState.reportResumeLastFailure;
+    delete nextState.reportResumeNextAttemptAt;
+  } else {
+    nextState.requesterPid = null;
+    nextState.reportResumeLastFailedAt = updatedAt;
+    nextState.reportResumeLastFailure = String(error?.message || error).slice(0, 900);
+    nextState.reportResumeNextAttemptAt = new Date(
+      currentTime + 15 * 60 * 1000,
+    ).toISOString();
+  }
+  persistState(nextState);
 }
 
 function safeName(value) {
@@ -519,6 +596,7 @@ async function sendDingTalk(markdown, options = {}) {
     method: "POST",
     headers: { "content-type": "application/json" },
     body,
+    signal: requestTimeoutSignal(),
   });
   const result = await response.text();
   if (!response.ok) {
@@ -536,10 +614,17 @@ async function sendDingTalk(markdown, options = {}) {
 }
 
 async function runReportOnce(outputDir) {
+  const guardReportDate = shouldGuardFormalReportTarget()
+    ? createReportTargetDateGuard(
+      resolveReportTargetDate(process.env.REPORT_TARGET_DATE),
+      { label: "正式报表" },
+    )
+    : () => {};
   await withLock("browser-profile", {
     waitMs: Number(process.env.BROWSER_LOCK_WAIT_MS || 10 * 60 * 1000),
     staleMs: Number(process.env.BROWSER_LOCK_STALE_MS || 30 * 60 * 1000),
   }, async () => {
+    guardReportDate("抓取前");
     const context = await launchContext();
 
     try {
@@ -574,6 +659,7 @@ async function runReportOnce(outputDir) {
           attempts,
         )
         : null;
+      guardReportDate("报表产物写入前");
       const outputSuffix = String(process.env.REPORT_OUTPUT_SUFFIX || "")
         .replace(/[^A-Za-z0-9_-]/g, "");
       const suffix = outputSuffix ? `-${outputSuffix}` : "";
@@ -593,7 +679,11 @@ async function runReportOnce(outputDir) {
         dateText,
         suffix: outputSuffix,
       });
-      await sendDingTalk(markdown);
+      await runGuardedAction(
+        guardReportDate,
+        "正式发送前",
+        () => sendDingTalk(markdown),
+      );
     } finally {
       await context.close();
     }
@@ -609,11 +699,20 @@ async function main() {
     await runReportOnce(outputDir);
   } catch (error) {
     const listenerManaged = process.env.REPORT_MANAGED_BY_LISTENER === "1";
-    if (!isZhimadiLoginError(error) || listenerManaged) throw error;
+    const scheduledManaged = process.env.REPORT_MANAGED_BY_SCHEDULED === "1";
+    if (!isZhimadiLoginError(error)) throw error;
 
-    const repair = await repairZhimadiLogin();
+    const repair = await repairZhimadiLogin({
+      deferToListener: listenerManaged || scheduledManaged,
+    });
     console.log(`芝麻地自动登录修复完成：${repair.status}，重新生成报表`);
-    await runReportOnce(outputDir);
+    try {
+      await runReportOnce(outputDir);
+      persistRequesterReportResumeOutcome(repair, "success");
+    } catch (resumeError) {
+      persistRequesterReportResumeOutcome(repair, "failed", resumeError);
+      throw resumeError;
+    }
   }
 }
 
@@ -636,5 +735,7 @@ if (require.main === module) {
 module.exports = {
   isZhimadiRepairAlertOwnedError,
   isZhimadiRepairDeferredError,
+  persistRequesterReportResumeOutcome,
   repairCanResumeInProcess,
+  shouldRequestReportAfterLogin,
 };

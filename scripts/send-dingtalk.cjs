@@ -57,6 +57,46 @@ function assertDingTalkSuccess(result, label) {
   }
 }
 
+function requestTimeoutMs(
+  envName = "DINGTALK_HTTP_TIMEOUT_MS",
+  fallbackMs = 30 * 1000,
+) {
+  const configured = Number(process.env[envName]);
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : fallbackMs;
+}
+
+function requestTimeoutSignal(
+  envName = "DINGTALK_HTTP_TIMEOUT_MS",
+  fallbackMs = 30 * 1000,
+) {
+  return AbortSignal.timeout(requestTimeoutMs(envName, fallbackMs));
+}
+
+function withPromiseTimeout(task, {
+  timeoutMs = requestTimeoutMs(),
+  label = "外部请求",
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+} = {}) {
+  let timer;
+  const timeout = new Promise((unused, reject) => {
+    timer = setTimer(() => {
+      const error = new Error(`${label}超时（${timeoutMs}ms）`);
+      error.code = "PROMISE_TIMEOUT";
+      reject(error);
+    }, timeoutMs);
+  });
+  const pending = Promise.resolve().then(() => (
+    typeof task === "function" ? task() : task
+  ));
+
+  return Promise.race([pending, timeout]).finally(() => {
+    if (timer !== undefined) clearTimer(timer);
+  });
+}
+
 async function sendDingTalkMarkdown(title, text, options = {}) {
   const payload = {
     msgtype: "markdown",
@@ -69,6 +109,7 @@ async function sendDingTalkMarkdown(title, text, options = {}) {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
+    signal: requestTimeoutSignal(),
   });
 
   const result = await response.text();
@@ -94,6 +135,7 @@ async function sendDingTalkImage(filePath) {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
+    signal: requestTimeoutSignal(),
   });
 
   const result = await response.text();
@@ -119,4 +161,11 @@ if (require.main === module) {
   });
 }
 
-module.exports = { loadEnv, sendDingTalkMarkdown, sendDingTalkImage };
+module.exports = {
+  loadEnv,
+  requestTimeoutMs,
+  requestTimeoutSignal,
+  sendDingTalkMarkdown,
+  sendDingTalkImage,
+  withPromiseTimeout,
+};

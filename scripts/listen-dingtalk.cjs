@@ -12,7 +12,13 @@ const {
   requesterCanResumeReport,
   runSingleCaptchaAttempt,
 } = require("./zhimadi-repair-coordinator.cjs");
-const { sendDingTalkImage, sendDingTalkMarkdown } = require("./send-dingtalk.cjs");
+const {
+  requestTimeoutMs,
+  requestTimeoutSignal,
+  sendDingTalkImage,
+  sendDingTalkMarkdown,
+  withPromiseTimeout,
+} = require("./send-dingtalk.cjs");
 const {
   handleHistoryCommand,
   parseHistoryCommand,
@@ -90,6 +96,87 @@ function errorSummary(error) {
     .slice(-8)
     .join("\n")
     .slice(0, 900);
+}
+
+function localDateText(timestamp = Date.now()) {
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function hasBoundLoginContext(message) {
+  return Boolean(
+    message?.conversationId
+    && message?.senderStaffId
+    && message?.robotCode,
+  );
+}
+
+function promptDeliveryDefinitelyNotSent(error) {
+  if (error?.code === "PROMISE_TIMEOUT") return true;
+  const text = errorSummary(error).toLowerCase();
+  return !/timeout|timed out|abort|fetch failed|network/.test(text);
+}
+
+async function sendBestEffort(label, send, warn = console.warn) {
+  try {
+    await send();
+    return true;
+  } catch (error) {
+    warn(`${label}发送失败：${errorSummary(error)}`);
+    return false;
+  }
+}
+
+function runWithTaskWatchdog(task, {
+  timeoutMs,
+  label = "后台任务",
+  onTimeout = () => {},
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+} = {}) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error(`${label}看门狗超时配置无效`);
+  }
+
+  let timer;
+  const timeout = new Promise((unused, reject) => {
+    timer = setTimer(() => {
+      const error = new Error(`${label}超过 ${timeoutMs}ms 未完成`);
+      error.code = "TASK_WATCHDOG_TIMEOUT";
+      try {
+        onTimeout({ error, label, timeoutMs });
+      } catch (timeoutError) {
+        error.cause = timeoutError;
+      }
+      reject(error);
+    }, timeoutMs);
+  });
+  const pending = Promise.resolve().then(task);
+
+  return Promise.race([pending, timeout]).finally(() => {
+    if (timer !== undefined) clearTimer(timer);
+  });
+}
+
+async function notifyLockStalled(result, {
+  send = sendDingTalkMarkdown,
+  warn = console.warn,
+} = {}) {
+  if (result?.outcome !== "lock-stalled") return false;
+
+  return sendBestEffort(
+    "自动修复延迟通知",
+    () => send(
+      "水果店登录修复延迟",
+      "### 水果店登录修复延迟\n\n自动修复已持续超过三小时，浏览器任务仍占用登录资源。后台会继续重试；若数小时后仍未恢复，再需要人工处理。",
+      { alert: true },
+    ),
+    warn,
+  );
+  return true;
 }
 
 function loadCommandState() {
@@ -342,7 +429,10 @@ function rememberCommand(key) {
 async function sendSessionText(client, sessionWebhook, senderStaffId, content) {
   if (!sessionWebhook) return;
 
-  const accessToken = await client.getAccessToken();
+  const accessToken = await withPromiseTimeout(
+    () => client.getAccessToken(),
+    { label: "钉钉访问令牌" },
+  );
   const response = await fetch(sessionWebhook, {
     method: "POST",
     headers: {
@@ -357,6 +447,7 @@ async function sendSessionText(client, sessionWebhook, senderStaffId, content) {
         isAtAll: false,
       },
     }),
+    signal: requestTimeoutSignal(),
   });
   const result = await response.text();
   if (!response.ok) {
@@ -374,19 +465,45 @@ async function sendSessionText(client, sessionWebhook, senderStaffId, content) {
   }
 }
 
-function runMonthlyReport() {
+function stopChildProcessGroup(child, signal) {
+  if (!child?.pid) return;
+  try {
+    if (process.platform === "win32") child.kill(signal);
+    else process.kill(-child.pid, signal);
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {
+      // The child already exited.
+    }
+  }
+}
+
+function runReportChild(args, {
+  env,
+  label,
+  timeoutMs = requestTimeoutMs("REPORT_RESUME_TIMEOUT_MS", 15 * 60 * 1000),
+  killGraceMs = 5000,
+} = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["scripts/daily-report.cjs"], {
+    const child = spawn(process.execPath, args, {
       cwd: process.cwd(),
-      env: {
-        ...process.env,
-        REPORT_MANAGED_BY_LISTENER: "1",
-        REPORT_FAILURE_ALERTS: "false",
-      },
+      env,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
     });
 
     let output = "";
+    let timedOut = false;
+    let settled = false;
+    let killTimer;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      stopChildProcessGroup(child, "SIGTERM");
+      killTimer = setTimeout(() => {
+        stopChildProcessGroup(child, "SIGKILL");
+      }, killGraceMs);
+    }, timeoutMs);
     child.stdout.on("data", (chunk) => {
       output += chunk.toString();
       process.stdout.write(chunk);
@@ -395,11 +512,27 @@ function runMonthlyReport() {
       output += chunk.toString();
       process.stderr.write(chunk);
     });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) resolve(output);
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (killTimer) clearTimeout(killTimer);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (killTimer) clearTimeout(killTimer);
+      if (timedOut) {
+        const error = new Error(`${label}超时 ${Math.round(timeoutMs / 1000)} 秒`);
+        error.exitCode = 1;
+        error.output = output;
+        reject(error);
+      } else if (code === 0) resolve(output);
       else {
-        const error = new Error(`月报脚本退出码 ${code}`);
+        const error = new Error(`${label}退出码 ${code}`);
+        error.exitCode = code;
         error.output = output;
         reject(error);
       }
@@ -407,39 +540,58 @@ function runMonthlyReport() {
   });
 }
 
-function runScheduledReport() {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["scripts/run-scheduled-report.cjs"], {
-      cwd: process.cwd(),
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let output = "";
-    child.stdout.on("data", (chunk) => {
-      output += chunk.toString();
-      process.stdout.write(chunk);
-    });
-    child.stderr.on("data", (chunk) => {
-      output += chunk.toString();
-      process.stderr.write(chunk);
-    });
-    child.once("error", reject);
-    child.once("close", (code) => {
-      if (code === 0) resolve(output);
-      else {
-        const error = new Error(`定时报表续跑退出码 ${code}`);
-        error.output = output;
-        reject(error);
-      }
-    });
+function runMonthlyReport(reportDate, {
+  currentDate = localDateText,
+  runChild = runReportChild,
+  env = process.env,
+} = {}) {
+  const targetDate = reportDate || currentDate();
+  return runChild(["scripts/daily-report.cjs"], {
+    label: "月报脚本",
+    env: {
+      ...env,
+      REPORT_MANAGED_BY_LISTENER: "1",
+      REPORT_FAILURE_ALERTS: "false",
+      REPORT_TARGET_DATE: targetDate,
+    },
+  });
+}
+
+function scheduledResumeTimeoutMs(env = process.env) {
+  const configuredInner = Number(env.SCHEDULED_REPORT_TIMEOUT_MS);
+  const innerTimeoutMs = Number.isFinite(configuredInner) && configuredInner > 0
+    ? configuredInner
+    : 15 * 60 * 1000;
+  const configuredOuter = Number(env.SCHEDULED_REPORT_RESUME_TIMEOUT_MS);
+  const requestedOuter = Number.isFinite(configuredOuter) && configuredOuter > 0
+    ? configuredOuter
+    : innerTimeoutMs + 60 * 1000;
+  return Math.max(requestedOuter, innerTimeoutMs + 30 * 1000);
+}
+
+function runScheduledReport(reportDate) {
+  return runReportChild(["scripts/run-scheduled-report.cjs"], {
+    label: "定时报表续跑",
+    timeoutMs: scheduledResumeTimeoutMs(),
+    env: {
+      ...process.env,
+      ...(reportDate ? { REPORT_TARGET_DATE: reportDate } : {}),
+    },
   });
 }
 
 function selectReportRunner(reportResumeMode, {
   scheduled = runScheduledReport,
   monthly = runMonthlyReport,
+  reportDate,
 } = {}) {
-  return reportResumeMode === "scheduled" ? scheduled : monthly;
+  return reportResumeMode === "scheduled"
+    ? () => scheduled(reportDate)
+    : () => monthly(reportDate);
+}
+
+function isDeferredMonthlyReportError(error) {
+  return error?.exitCode === 2;
 }
 
 function isProcessRunning(pid) {
@@ -452,8 +604,298 @@ function isProcessRunning(pid) {
   }
 }
 
+function reportResumeClaimIsActive(state, {
+  now = Date.now(),
+  isRunning = isProcessRunning,
+} = {}) {
+  if (!state?.reportResumeClaimedAt) return false;
+  if (state.reportResumeOwner === "requester") {
+    const leaseUntil = Date.parse(state.reportResumeLeaseUntil || "");
+    return Number.isFinite(leaseUntil)
+      && leaseUntil > now
+      && isRunning(Number(state.reportResumeOwnerPid));
+  }
+
+  const leaseUntil = Date.parse(state.reportResumeLeaseUntil || "");
+  return Number.isFinite(leaseUntil)
+    && leaseUntil > now
+    && isRunning(Number(state.reportResumeOwnerPid));
+}
+
+function clearReportResumeClaim(state) {
+  const nextState = { ...state };
+  delete nextState.reportResumeClaimId;
+  delete nextState.reportResumeClaimedAt;
+  delete nextState.reportResumeOwner;
+  delete nextState.reportResumeOwnerPid;
+  delete nextState.reportResumeLeaseUntil;
+  return nextState;
+}
+
+function promoteLatestListenerResumeIntent(state, blockedAt, currentReportDate) {
+  const intent = state?.latestListenerResumeIntent;
+  if (
+    intent?.reportResumeMode !== "listener"
+    || !intent.requestedAt
+    || !intent.reportDate
+    || intent.reportDate !== currentReportDate
+  ) return null;
+
+  const nextState = clearReportResumeClaim(state);
+  nextState.blockedScheduledResumeIntent = {
+    requestedAt: state.reportRequestedAt || state.incidentStartedAt || null,
+    reportResumeMode: "scheduled",
+    reportDate: state.reportDate || null,
+    blockedAt,
+    reason: "date-rollover-unverified-sources",
+  };
+  nextState.afterLoginReport = true;
+  nextState.reportResumeMode = "listener";
+  nextState.reportDate = intent.reportDate;
+  nextState.requesterPid = Number.isInteger(intent.requesterPid)
+    ? intent.requesterPid
+    : null;
+  nextState.requesterResumeMode = "listener";
+  nextState.reportRequestedAt = intent.requestedAt;
+  nextState.handledListenerResumeRequestAt = intent.requestedAt;
+  nextState.updatedAt = blockedAt;
+  delete nextState.latestListenerResumeIntent;
+  delete nextState.reportResumeCompletedAt;
+  delete nextState.reportResumeDateBlockedAt;
+  delete nextState.reportResumeBlockedReason;
+  delete nextState.reportResumeStartedAt;
+  delete nextState.reportResumeAttemptCount;
+  delete nextState.reportResumeLastFailedAt;
+  delete nextState.reportResumeLastFailure;
+  delete nextState.reportResumeNextAttemptAt;
+  delete nextState.reportResumeAlertAttemptedAt;
+  return nextState;
+}
+
+function canonicalReportDate(value) {
+  const text = String(value || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  const parsed = new Date(`${text}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === text
+    ? text
+    : null;
+}
+
+function createReportResumeFlow({
+  loadState,
+  persistState,
+  runReport,
+  sendAlert = sendDingTalkMarkdown,
+  now = Date.now,
+  isRunning = isProcessRunning,
+  processId = process.pid,
+  requesterGraceMs = Number(
+    process.env.ZHIMADI_REQUESTER_GRACE_MS || 4 * 60 * 1000,
+  ),
+  retryDelayMs = 15 * 60 * 1000,
+  alertDelayMs = 3 * 60 * 60 * 1000,
+  currentDate = localDateText,
+} = {}) {
+  if (
+    typeof loadState !== "function"
+    || typeof persistState !== "function"
+    || typeof runReport !== "function"
+  ) {
+    throw new Error("报表续跑流程缺少依赖");
+  }
+
+  return async function resumeReportAfterRepair(state) {
+    if (state?.afterLoginReport !== true || state.reportResumeCompletedAt) return;
+    const currentTime = now();
+    const currentReportDate = currentDate(currentTime);
+    if (
+      state.reportResumeMode === "listener"
+      && canonicalReportDate(state.reportDate) !== currentReportDate
+    ) {
+      const blockedAt = new Date(currentTime).toISOString();
+      const blockedState = clearReportResumeClaim(state);
+      blockedState.afterLoginReport = false;
+      blockedState.blockedListenerResumeIntent = {
+        requestedAt: state.reportRequestedAt || null,
+        reportResumeMode: "listener",
+        reportDate: state.reportDate || null,
+        blockedAt,
+        reason: "date-rollover-unverified-sources",
+      };
+      blockedState.reportResumeDateBlockedAt = blockedAt;
+      blockedState.reportResumeBlockedReason = "date-rollover-unverified-sources";
+      blockedState.updatedAt = blockedAt;
+      persistState(blockedState);
+      await sendAlert(
+        "水果店跨日手动报表未自动补发",
+        "### 水果店跨日手动报表未自动补发\n\n手动报表的目标日期已经变化，本次未自动推送，避免把新一天的数据回应到旧请求。",
+        { alert: true },
+      ).catch((error) => {
+        console.warn(`跨日手动报表提示发送失败：${errorSummary(error)}`);
+      });
+      return;
+    }
+    if (
+      state.reportResumeMode === "scheduled"
+      && !canonicalReportDate(state.reportDate)
+    ) {
+      const blockedAt = new Date(currentTime).toISOString();
+      const blockedState = clearReportResumeClaim(state);
+      blockedState.reportResumeDateBlockedAt = blockedAt;
+      blockedState.reportResumeBlockedReason = "missing-or-invalid-target-date";
+      blockedState.updatedAt = blockedAt;
+      const promotedState = promoteLatestListenerResumeIntent(
+        blockedState,
+        blockedAt,
+        currentReportDate,
+      );
+      if (promotedState) {
+        state = promotedState;
+      } else {
+        if (blockedState.latestListenerResumeIntent) {
+          blockedState.blockedListenerResumeIntent = {
+            ...blockedState.latestListenerResumeIntent,
+            blockedAt,
+            reason: "date-rollover-unverified-sources",
+          };
+          delete blockedState.latestListenerResumeIntent;
+        }
+        blockedState.afterLoginReport = false;
+        state = blockedState;
+      }
+      persistState(state);
+      await sendAlert(
+        "水果店报表目标日期缺失",
+        "### 水果店报表目标日期缺失\n\n旧定时报表没有可信目标日期，本次未自动推送，避免把当前数据误记到未知日期。",
+        { alert: true },
+      ).catch((error) => {
+        console.warn(`报表目标日期提示发送失败：${errorSummary(error)}`);
+      });
+      if (!promotedState) return;
+    }
+    if (
+      state.reportResumeMode === "scheduled"
+      && state.reportDate
+      && state.reportDate !== currentReportDate
+    ) {
+      const incidentDeadline = Date.parse(state.deadlineAt || "");
+      if (Number.isFinite(incidentDeadline) && currentTime < incidentDeadline) return;
+      if (state.reportResumeDateBlockedAt && !state.latestListenerResumeIntent) return;
+
+      const blockedAt = new Date(currentTime).toISOString();
+      const blockedState = clearReportResumeClaim(state);
+      blockedState.reportResumeDateBlockedAt = blockedAt;
+      blockedState.reportResumeBlockedReason = "date-rollover-unverified-sources";
+      blockedState.updatedAt = blockedAt;
+      const promotedState = promoteLatestListenerResumeIntent(
+        blockedState,
+        blockedAt,
+        currentReportDate,
+      );
+      if (promotedState) {
+        state = promotedState;
+      } else {
+        if (blockedState.latestListenerResumeIntent) {
+          blockedState.blockedListenerResumeIntent = {
+            ...blockedState.latestListenerResumeIntent,
+            blockedAt,
+            reason: "date-rollover-unverified-sources",
+          };
+          delete blockedState.latestListenerResumeIntent;
+        }
+        blockedState.afterLoginReport = false;
+        state = blockedState;
+      }
+      persistState(state);
+      await sendAlert(
+        "水果店跨日报表未自动补发",
+        `### 水果店跨日报表未自动补发\n\n${blockedState.reportDate} 的报表登录已恢复，但已经跨日。为避免把新一天或新月份的数据记入旧报表，本次未自动推送；下一次正常定时报表不受影响。`,
+        { alert: true },
+      ).catch((error) => {
+        console.warn(`跨日报表提示发送失败：${errorSummary(error)}`);
+      });
+      if (!promotedState) return;
+    }
+    const retryAt = Date.parse(state.reportResumeNextAttemptAt || "");
+    if (Number.isFinite(retryAt) && retryAt > currentTime) return;
+    if (reportResumeClaimIsActive(state, { now: currentTime, isRunning })) return;
+
+    const requesterOwnsResume = requesterCanResumeReport(state, {
+      now: currentTime,
+      isProcessRunning: isRunning,
+      graceMs: requesterGraceMs,
+    });
+    const claimId = crypto.randomUUID();
+    const claimedAt = new Date(currentTime).toISOString();
+    const claimedState = {
+      ...clearReportResumeClaim(state),
+      reportResumeClaimId: claimId,
+      reportResumeClaimedAt: claimedAt,
+      reportResumeOwner: requesterOwnsResume ? "requester" : "listener",
+      reportResumeOwnerPid: requesterOwnsResume
+        ? Number(state.requesterPid)
+        : processId,
+      reportResumeLeaseUntil: new Date(
+        currentTime + (requesterOwnsResume ? 60 : 20) * 60 * 1000,
+      ).toISOString(),
+      reportResumeStartedAt: state.reportResumeStartedAt || claimedAt,
+      reportResumeAttemptCount: Number(state.reportResumeAttemptCount || 0) + 1,
+    };
+    delete claimedState.reportResumeNextAttemptAt;
+    persistState(claimedState);
+    if (requesterOwnsResume) return;
+
+    try {
+      await runReport(claimedState);
+      const currentState = loadState();
+      if (currentState?.reportResumeClaimId === claimId) {
+        const completedState = clearReportResumeClaim(currentState);
+        completedState.afterLoginReport = false;
+        completedState.reportResumeCompletedAt = new Date(now()).toISOString();
+        completedState.updatedAt = completedState.reportResumeCompletedAt;
+        delete completedState.reportResumeLastFailure;
+        delete completedState.reportResumeNextAttemptAt;
+        persistState(completedState);
+      }
+    } catch (error) {
+      const failedAt = now();
+      const currentState = loadState();
+      if (currentState?.reportResumeClaimId === claimId) {
+        const failedState = clearReportResumeClaim(currentState);
+        failedState.reportResumeLastFailedAt = new Date(failedAt).toISOString();
+        failedState.reportResumeLastFailure = errorSummary(error);
+        failedState.reportResumeNextAttemptAt = new Date(
+          failedAt + retryDelayMs,
+        ).toISOString();
+        failedState.updatedAt = failedState.reportResumeLastFailedAt;
+        const resumeStartedAt = Date.parse(failedState.reportResumeStartedAt || "");
+        const shouldAlert = Number.isFinite(resumeStartedAt)
+          && failedAt - resumeStartedAt >= alertDelayMs
+          && !failedState.reportResumeAlertAttemptedAt;
+        if (shouldAlert) {
+          failedState.reportResumeAlertAttemptedAt = failedState.reportResumeLastFailedAt;
+        }
+        persistState(failedState);
+        if (shouldAlert) {
+          await sendAlert(
+            "水果店报表续跑失败",
+            `### 水果店报表续跑失败\n\n登录已恢复，但报表自动续跑超过 3 小时仍未成功。后台会继续每 15 分钟重试。\n\n${failedState.reportResumeLastFailure}`,
+            { alert: true },
+          ).catch((alertError) => {
+            console.warn(`报表续跑失败通知发送失败：${errorSummary(alertError)}`);
+          });
+        }
+      }
+      throw error;
+    }
+  };
+}
+
 async function uploadDingTalkImage(client, filePath) {
-  const accessToken = await client.getAccessToken();
+  const accessToken = await withPromiseTimeout(
+    () => client.getAccessToken(),
+    { label: "钉钉访问令牌" },
+  );
   const endpoints = [
     "https://oapi.dingtalk.io/media/upload",
     "https://oapi.dingtalk.com/media/upload",
@@ -468,7 +910,11 @@ async function uploadDingTalkImage(client, filePath) {
     form.append("media", new Blob([buffer], { type: "image/png" }), path.basename(filePath));
 
     try {
-      const response = await fetch(endpoint, { method: "POST", body: form });
+      const response = await fetch(endpoint, {
+        method: "POST",
+        body: form,
+        signal: requestTimeoutSignal(),
+      });
       const text = await response.text();
       if (!response.ok) throw new Error(`${response.status} ${text}`);
 
@@ -484,7 +930,10 @@ async function uploadDingTalkImage(client, filePath) {
 }
 
 async function sendGroupImage(client, message, mediaId) {
-  const accessToken = await client.getAccessToken();
+  const accessToken = await withPromiseTimeout(
+    () => client.getAccessToken(),
+    { label: "钉钉访问令牌" },
+  );
   const body = {
     msgParam: JSON.stringify({ photoURL: mediaId }),
     msgKey: "sampleImageMsg",
@@ -507,6 +956,7 @@ async function sendGroupImage(client, message, mediaId) {
           "x-acs-dingtalk-access-token": accessToken,
         },
         body: JSON.stringify(body),
+        signal: requestTimeoutSignal(),
       });
       const text = await response.text();
       if (!response.ok) throw new Error(`${response.status} ${text}`);
@@ -521,10 +971,23 @@ async function sendGroupImage(client, message, mediaId) {
   throw new Error(`发送验证码图片失败: ${lastError?.message || "未知错误"}`);
 }
 
+async function deliverBoundCaptchaImage({ upload, send }) {
+  let mediaId;
+  try {
+    mediaId = await upload();
+  } catch (error) {
+    error.promptDefinitelyNotSent = true;
+    throw error;
+  }
+  return send(mediaId);
+}
+
 async function sendCaptchaImage(client, message, filePath) {
   if (message?.conversationId && message?.robotCode) {
-    const mediaId = await uploadDingTalkImage(client, filePath);
-    await sendGroupImage(client, message, mediaId);
+    await deliverBoundCaptchaImage({
+      upload: () => uploadDingTalkImage(client, filePath),
+      send: (mediaId) => sendGroupImage(client, message, mediaId),
+    });
     return;
   }
 
@@ -570,11 +1033,19 @@ function extractCaptchaCode(text) {
 
 function extractManualCaptchaCode(text) {
   const normalized = String(text || "");
-  const labeled = normalized.match(/(?:验证码|登录)[:：]?([A-Za-z0-9]{4,6})/i);
-  if (labeled) return labeled[1];
+  const labeled = normalized.match(
+    /(?:验证码|登录)[:：]?([A-Za-z0-9]{4,6})(?![A-Za-z0-9])/i,
+  );
+  return labeled ? labeled[1] : "";
+}
 
-  const tokens = normalized.match(/[A-Za-z0-9]{4,6}/g) || [];
-  return tokens.length === 1 ? tokens[0] : "";
+function isLoginSessionReply(session, message) {
+  return Boolean(
+    session?.conversationId
+    && session?.senderStaffId
+    && session.conversationId === message?.conversationId
+    && session.senderStaffId === message?.senderStaffId,
+  );
 }
 
 async function recognizeCaptchaWithOpenAI(filePath) {
@@ -606,6 +1077,7 @@ async function recognizeCaptchaWithOpenAI(filePath) {
       max_tokens: 16,
       temperature: 0,
     }),
+    signal: requestTimeoutSignal("OCR_HTTP_TIMEOUT_MS"),
   });
 
   const bodyText = await response.text();
@@ -901,16 +1373,29 @@ async function main() {
         await closeLoginSession(loginSession);
         loginSession = null;
         if (notifyAutoSuccess) {
-          await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地当前登录正常。");
+          await sendBestEffort(
+            "芝麻地登录状态回复",
+            () => sendSessionText(
+              client,
+              message.sessionWebhook,
+              message.senderStaffId,
+              "芝麻地当前登录正常。",
+            ),
+          );
         }
         if (autoReport) {
-          await selectReportRunner(reportResumeMode)();
+          await selectReportRunner(reportResumeMode, {
+            reportDate: options.reportDate,
+          })();
         }
         return "already-ok";
       }
       loginSession.afterLoginReport = afterLoginReport;
       loginSession.repairIncidentId = repairIncidentId;
       loginSession.reportResumeMode = reportResumeMode;
+      loginSession.reportDate = options.reportDate || null;
+      loginSession.conversationId = message?.conversationId || null;
+      loginSession.senderStaffId = message?.senderStaffId || null;
 
       const autoLogin = tryAutomatic
         ? await tryAutoZhimadiLogin(loginSession)
@@ -919,11 +1404,29 @@ async function main() {
         await closeLoginSession(loginSession);
         loginSession = null;
         if (notifyAutoSuccess) {
-          await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "芝麻地已自动重新登录。");
+          await sendBestEffort(
+            "芝麻地自动登录回复",
+            () => sendSessionText(
+              client,
+              message.sessionWebhook,
+              message.senderStaffId,
+              "芝麻地已自动重新登录。",
+            ),
+          );
         }
         if (autoReport) {
-          await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "正在重新生成月报。");
-          await selectReportRunner(reportResumeMode)();
+          await sendBestEffort(
+            "月报续跑回复",
+            () => sendSessionText(
+              client,
+              message.sessionWebhook,
+              message.senderStaffId,
+              "正在重新生成月报。",
+            ),
+          );
+          await selectReportRunner(reportResumeMode, {
+            reportDate: options.reportDate,
+          })();
         }
         return "auto-ok";
       }
@@ -940,7 +1443,14 @@ async function main() {
       loginSession.screenshotPath = screenshots.screenshotPath;
       loginSession.captchaPath = screenshots.captchaPath;
 
-      await sendCaptchaImage(client, message, loginSession.captchaPath);
+      try {
+        await sendCaptchaImage(client, message, loginSession.captchaPath);
+      } catch (error) {
+        if (promptDeliveryDefinitelyNotSent(error)) {
+          error.promptDefinitelyNotSent = true;
+        }
+        throw error;
+      }
       loginSession.expireTimer = setTimeout(async () => {
         if (!loginSession) return;
         const expiredIncidentId = loginSession.repairIncidentId;
@@ -956,13 +1466,35 @@ async function main() {
           if (nextState !== currentState) writeJsonAtomic(repairStatePath, nextState);
         }
       }, loginSessionTtlMs).unref();
+      const instruction = "回复：验证码ABCD";
       if (message.sessionWebhook) {
-        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "回复：验证码ABCD");
+        const sessionSent = await sendBestEffort(
+          "验证码回复说明",
+          () => sendSessionText(
+            client,
+            message.sessionWebhook,
+            message.senderStaffId,
+            instruction,
+          ),
+        );
+        if (!sessionSent) {
+          await sendBestEffort(
+            "验证码回复说明备用通知",
+            () => sendDingTalkMarkdown(
+              "水果店登录验证码",
+              `### 水果店登录验证码\n\n自动修复持续 3 小时仍未恢复，请${instruction}`,
+              { alert: true },
+            ),
+          );
+        }
       } else {
-        await sendDingTalkMarkdown(
-          "水果店登录验证码",
-          "### 水果店登录验证码\n\n自动修复持续 3 小时仍未恢复，请回复：验证码ABCD",
-          { alert: true },
+        await sendBestEffort(
+          "验证码回复说明",
+          () => sendDingTalkMarkdown(
+            "水果店登录验证码",
+            `### 水果店登录验证码\n\n自动修复持续 3 小时仍未恢复，请${instruction}`,
+            { alert: true },
+          ),
         );
       }
       return "captcha-sent";
@@ -980,55 +1512,88 @@ async function main() {
     runAttempt: async () => {
       running = true;
       try {
-        return await runSilentZhimadiRepairAttempt();
+        return await runWithTaskWatchdog(
+          () => runSilentZhimadiRepairAttempt(),
+          {
+            timeoutMs: requestTimeoutMs(
+              "ZHIMADI_SILENT_TASK_WATCHDOG_MS",
+              5 * 60 * 1000,
+            ),
+            label: "芝麻地静默修复",
+            onTimeout: ({ error }) => {
+              writeHeartbeat("task-timeout");
+              console.error(error.message);
+              process.exit(1);
+            },
+          },
+        );
       } finally {
         running = false;
       }
     },
-    escalate: async ({ incidentId, afterLoginReport, reportResumeMode }) => {
+    escalate: async ({ incidentId, afterLoginReport, reportResumeMode, reportDate }) => {
+      const context = loadGroupContext();
+      if (!hasBoundLoginContext(context)) {
+        return {
+          outcome: "unavailable",
+          error: "缺少可绑定的人工验证码群会话，继续后台自动修复",
+        };
+      }
       running = true;
       try {
-        const result = await startZhimadiCaptchaFlow(loadGroupContext() || {}, {
-          afterLoginReport,
-          autoReport: false,
-          notifyAutoSuccess: false,
-          tryAutomatic: false,
-          repairIncidentId: incidentId,
-          reportResumeMode,
-        });
+        const result = await runWithTaskWatchdog(
+          () => startZhimadiCaptchaFlow(context, {
+            afterLoginReport,
+            autoReport: false,
+            notifyAutoSuccess: false,
+            tryAutomatic: false,
+            repairIncidentId: incidentId,
+            reportResumeMode,
+            reportDate,
+          }),
+          {
+            timeoutMs: requestTimeoutMs(
+              "ZHIMADI_ESCALATION_TASK_WATCHDOG_MS",
+              12 * 60 * 1000,
+            ),
+            label: "芝麻地人工提示准备",
+            onTimeout: ({ error }) => {
+              writeHeartbeat("task-timeout");
+              console.error(error.message);
+              process.exit(1);
+            },
+          },
+        );
         if (result === "captcha-sent") return { outcome: "captcha-sent" };
         running = false;
         return { outcome: "success" };
       } catch (error) {
         running = false;
+        if (error?.promptDefinitelyNotSent) {
+          return {
+            outcome: "unavailable",
+            error: errorSummary(error),
+          };
+        }
         throw error;
       }
     },
   });
   let autoRepairTickRunning = false;
-
-  async function resumeReportAfterRepair(state) {
-    if (state?.afterLoginReport !== true || state.reportResumeClaimedAt) return;
-    const requesterGraceMs = Number(process.env.ZHIMADI_REQUESTER_GRACE_MS || 4 * 60 * 1000);
-    const requesterOwnsResume = requesterCanResumeReport(state, {
-      isProcessRunning,
-      graceMs: requesterGraceMs,
-    });
-    const claimedState = {
-      ...state,
-      reportResumeClaimedAt: new Date().toISOString(),
-      reportResumeOwner: requesterOwnsResume ? "requester" : "listener",
-    };
-    writeJsonAtomic(repairStatePath, claimedState);
-    if (requesterOwnsResume) return;
-
-    running = true;
-    try {
-      await selectReportRunner(claimedState.reportResumeMode)();
-    } finally {
-      running = false;
-    }
-  }
+  const resumeReportAfterRepair = createReportResumeFlow({
+    loadState: () => readJson(repairStatePath),
+    persistState: (state) => writeJsonAtomic(repairStatePath, state),
+    runReport: async (state) => {
+      running = true;
+      try {
+        await selectReportRunner(state.reportResumeMode, {
+          reportDate: state.reportDate,
+        })();
+      } finally {
+        running = false;
+      }
+    },
+  });
 
   async function handleAutoRepairRequest() {
     if (running || loginSession || autoRepairTickRunning) return;
@@ -1056,6 +1621,20 @@ async function main() {
         ).catch((error) => {
           console.warn(`自动修复失败通知发送失败：${error.message}`);
         });
+      } else if (result.outcome === "lock-stalled") {
+        if (await notifyLockStalled(result)) {
+          const currentState = readJson(repairStatePath);
+          if (
+            currentState?.incidentId === result.state?.incidentId
+            && !currentState.lockBusyAlertSentAt
+          ) {
+            writeJsonAtomic(repairStatePath, {
+              ...currentState,
+              lockBusyAlertSentAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            });
+          }
+        }
       }
     } finally {
       autoRepairTickRunning = false;
@@ -1102,22 +1681,55 @@ async function main() {
     }
 
     const manualCaptchaCode = extractManualCaptchaCode(text);
-    if (loginSession && manualCaptchaCode) {
+    if (
+      loginSession
+      && manualCaptchaCode
+      && isLoginSessionReply(loginSession, message)
+    ) {
       const code = manualCaptchaCode;
       const repairIncidentId = loginSession.repairIncidentId;
+      const afterLoginReport = loginSession.afterLoginReport;
+      const reportResumeMode = loginSession.reportResumeMode;
+      const reportDate = loginSession.reportDate;
       try {
         await submitZhimadiLoginCode(loginSession, code);
-        const afterLoginReport = loginSession.afterLoginReport;
-        const reportResumeMode = loginSession.reportResumeMode;
+      } catch (error) {
         await closeLoginSession(loginSession);
         loginSession = null;
+        running = false;
+        persistManualRepairOutcome(repairIncidentId, "failed", error.message);
+        await sendBestEffort(
+          "芝麻地验证码失败回复",
+          () => sendSessionText(
+            client,
+            message.sessionWebhook,
+            message.senderStaffId,
+            `验证码失败：${error.message}`,
+          ),
+        );
+        console.error(error.stack || error.message);
+        return;
+      }
+
+      await closeLoginSession(loginSession);
+      loginSession = null;
+      try {
         const repairedState = persistManualRepairOutcome(repairIncidentId, "ok");
         if (afterLoginReport) {
-          await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "登录已恢复，继续生成月报。");
+          await sendBestEffort(
+            "芝麻地登录恢复回复",
+            () => sendSessionText(
+              client,
+              message.sessionWebhook,
+              message.senderStaffId,
+              "登录已恢复，继续生成月报。",
+            ),
+          );
           const resumeReport = repairedState
             ? () => resumeReportAfterRepair(repairedState)
-            : selectReportRunner(reportResumeMode);
-          resumeReport()
+            : selectReportRunner(reportResumeMode, { reportDate });
+          Promise.resolve()
+            .then(resumeReport)
             .catch((error) => {
               console.error(error.stack || error.message);
             })
@@ -1126,15 +1738,19 @@ async function main() {
             });
         } else {
           running = false;
-          await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "登录已恢复。");
+          await sendBestEffort(
+            "芝麻地登录恢复回复",
+            () => sendSessionText(
+              client,
+              message.sessionWebhook,
+              message.senderStaffId,
+              "登录已恢复。",
+            ),
+          );
         }
       } catch (error) {
-        await closeLoginSession(loginSession);
-        loginSession = null;
         running = false;
-        persistManualRepairOutcome(repairIncidentId, "failed", error.message);
-        await sendSessionText(client, message.sessionWebhook, message.senderStaffId, `验证码失败：${error.message}`);
-        console.error(error.stack || error.message);
+        console.error(`芝麻地已认证，后续处理失败：${errorSummary(error)}`);
       }
       return;
     }
@@ -1205,6 +1821,7 @@ async function main() {
           repairIncidentId,
           afterLoginReport: repairState?.afterLoginReport === true,
           reportResumeMode: repairState?.reportResumeMode,
+          reportDate: repairState?.reportDate,
           autoReport: repairIncidentId ? false : undefined,
         });
         if (result !== "captcha-sent") {
@@ -1242,39 +1859,31 @@ async function main() {
 
     running = true;
     console.log(`[${new Date().toISOString()}] monthly report command accepted`);
-    await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "收到 666，正在生成本月报表。");
+    await sendBestEffort(
+      "月报开始回复",
+      () => sendSessionText(
+        client,
+        message.sessionWebhook,
+        message.senderStaffId,
+        "收到 666，正在生成本月报表。",
+      ),
+    );
 
     runMonthlyReport()
       .catch(async (error) => {
-        if (String(error.output || error.message).includes("芝麻地登录态失效")) {
-          try {
-            const repairState = readJson(repairStatePath);
-            const repairIncidentId = activeIncidentId(repairState);
-            const result = await startZhimadiCaptchaFlow(message, {
-              afterLoginReport: true,
-              repairIncidentId,
-              reportResumeMode: repairState?.reportResumeMode || "listener",
-              autoReport: repairIncidentId ? false : true,
-            });
-            if (result !== "captcha-sent") {
-              const repairedState = persistManualRepairOutcome(repairIncidentId, "ok");
-              if (repairedState) await resumeReportAfterRepair(repairedState);
-            }
-            return;
-          } catch (loginError) {
-            await closeLoginSession(loginSession);
-            loginSession = null;
-            running = false;
-            console.error(loginError.stack || loginError.message);
-            await sendSessionText(client, message.sessionWebhook, message.senderStaffId, `自动登录流程启动失败：${loginError.message}`);
-          }
+        if (isDeferredMonthlyReportError(error)) {
+          console.log("monthly-report-deferred-to-login-repair");
+          return;
         }
         console.error(error.stack || error.message);
-        await sendSessionText(
-          client,
-          message.sessionWebhook,
-          message.senderStaffId,
-          `本月报表生成失败，已触发失败通知。\n${errorSummary(error)}`,
+        await sendBestEffort(
+          "月报失败回复",
+          () => sendSessionText(
+            client,
+            message.sessionWebhook,
+            message.senderStaffId,
+            `本月报表生成失败，已触发失败通知。\n${errorSummary(error)}`,
+          ),
         );
       })
       .finally(() => {
@@ -1295,9 +1904,28 @@ if (require.main === module) {
 }
 
 module.exports = {
+  canonicalReportDate,
+  createReportResumeFlow,
   createDouyinSmsFlow,
+  deliverBoundCaptchaImage,
+  extractManualCaptchaCode,
+  hasBoundLoginContext,
+  isDeferredMonthlyReportError,
+  isLoginSessionReply,
   loadDouyinSmsTarget,
+  notifyLockStalled,
+  promptDeliveryDefinitelyNotSent,
+  reportResumeClaimIsActive,
+  promoteLatestListenerResumeIntent,
   retryableZhimadiRepairError,
+  runMonthlyReport,
+  runReportChild,
+  runWithTaskWatchdog,
   saveDouyinSmsTarget,
+  scheduledResumeTimeoutMs,
+  sendBestEffort,
+  sendGroupImage,
+  sendSessionText,
   selectReportRunner,
+  uploadDingTalkImage,
 };

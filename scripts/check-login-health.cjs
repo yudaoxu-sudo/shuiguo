@@ -4,6 +4,7 @@ const { chromium } = require("playwright");
 const {
   checkReportHealth,
   deferZhimadiHealthFailure,
+  isZhimadiRepairIncidentResolved,
   readJson,
   runNodePreview,
   writeJson,
@@ -24,9 +25,11 @@ const { gotoZhimadi, isZhimadiAuthenticated } = require("./zhimadi-navigation.cj
 const {
   markObservedZhimadiRecovery,
 } = require("./zhimadi-repair-coordinator.cjs");
+const {
+  persistMergedRepairRequest,
+} = require("./zhimadi-repair-request.cjs");
 
 const statePath = path.resolve("output/login-health-state.json");
-const repairRequestPath = path.resolve("output/zhimadi-login-repair-request.json");
 const repairStatePath = path.resolve("output/zhimadi-login-repair-state.json");
 const defaultRecoveryWindowMs = 20 * 60 * 1000;
 const defaultRetryIntervalMs = 60 * 1000;
@@ -153,7 +156,7 @@ async function runLoginInspection(timeoutMs) {
 function createLoginProbe(options = {}) {
   const {
     inspect = runLoginInspection,
-    persistRepairRequest = (request) => writeJson(repairRequestPath, request),
+    persistRepairRequest = persistMergedRepairRequest,
     loadRepairState = () => readJson(repairStatePath),
     now = () => Date.now(),
     repairRetryMs = configuredDuration(
@@ -164,7 +167,7 @@ function createLoginProbe(options = {}) {
   let lastRequestAt = null;
   let lastRequestMs = null;
 
-  function maybeRequestRepair(message, verifyOnly) {
+  async function maybeRequestRepair(message, verifyOnly) {
     if (verifyOnly || !String(message).includes("芝麻地")) return;
     const currentTime = now();
     if (lastRequestAt) {
@@ -180,12 +183,12 @@ function createLoginProbe(options = {}) {
     }
 
     const requestedAt = new Date(currentTime).toISOString();
-    persistRepairRequest({
+    const persistedRequest = await persistRepairRequest({
       requestedAt,
       reason: "login-healthcheck",
       failureAlertOwner: "login-healthcheck",
     });
-    lastRequestAt = requestedAt;
+    lastRequestAt = persistedRequest?.requestedAt || requestedAt;
     lastRequestMs = currentTime;
   }
 
@@ -194,13 +197,13 @@ function createLoginProbe(options = {}) {
     try {
       problems = await inspect(timeoutMs);
     } catch (error) {
-      maybeRequestRepair(finalHealthFailureMessage(error), verifyOnly);
+      await maybeRequestRepair(finalHealthFailureMessage(error), verifyOnly);
       throw error;
     }
     if (problems.length === 0) return "login-ok";
 
     const message = `登录态异常：${problems.join("；")}`;
-    maybeRequestRepair(message, verifyOnly);
+    await maybeRequestRepair(message, verifyOnly);
     throw new Error(message);
   };
 }
@@ -262,6 +265,7 @@ async function main() {
     }, async () => {
       const result = await checkLoginHealth({
         deferFailure: deferZhimadiHealthFailure,
+        isIncidentResolved: isZhimadiRepairIncidentResolved,
       });
       if (result.status === "failed") process.exitCode = 1;
     });

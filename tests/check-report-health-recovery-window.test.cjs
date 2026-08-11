@@ -7,15 +7,49 @@ const test = require("node:test");
 const {
   checkReportHealth,
   deferZhimadiHealthFailure,
+  isZhimadiRepairIncidentResolved,
   markReportHealthOk,
   runNodePreview,
 } = require("../scripts/check-report-health.cjs");
 const {
+  assertCurrentReportTargetDate,
+  resolveReportTargetDate,
+  runReport,
+  scheduledLoginDeferral,
   scheduledZhimadiDeferral,
 } = require("../scripts/run-scheduled-report.cjs");
 
 const baseNow = Date.parse("2026-07-30T04:00:00.000Z");
 const silent = () => {};
+
+test("scheduled report target dates are explicit and validated", () => {
+  assert.equal(resolveReportTargetDate("2026-08-10"), "2026-08-10");
+  assert.equal(resolveReportTargetDate("", "2026-08-11"), "2026-08-11");
+  assert.throws(() => resolveReportTargetDate("2026-02-30"), /日期无效/);
+  assert.throws(() => resolveReportTargetDate("../../etc/passwd"), /日期无效/);
+  assert.equal(
+    assertCurrentReportTargetDate("2026-08-11", "2026-08-11"),
+    "2026-08-11",
+  );
+  assert.throws(
+    () => assertCurrentReportTargetDate("2026-08-10", "2026-08-11"),
+    /拒绝自动生成/,
+  );
+});
+
+test("the scheduled wrapper terminates a hung report child", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "scheduled-timeout-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const fixture = path.join(directory, "hang.cjs");
+  fs.writeFileSync(fixture, "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);\n");
+
+  const result = await runReport(fixture, "2026-08-11", {
+    timeoutMs: 20,
+    killGraceMs: 20,
+  });
+  assert.equal(result.code, 1);
+  assert.match(result.outputTail, /子进程超时/);
+});
 
 test("Zhimadi repair deferral excludes combined Lemeng login failures", () => {
   const repairState = {
@@ -70,6 +104,12 @@ test("scheduled final alerts defer only the matching active Zhimadi login incide
     "TypeError: report builder invariant failed",
     loadRepairState,
   ), null);
+
+  assert.deepEqual(scheduledLoginDeferral(
+    { code: 2 },
+    "芝麻地登录态失效，自动修复已交由后台继续",
+    () => ({ status: "auto-ok" }),
+  ), { phase: "child-deferred-login-repair" });
 });
 
 test("a scheduled report can mark report health healthy at its proof time", () => {
@@ -222,6 +262,42 @@ test("an external Zhimadi repair incident defers the health alert without a long
   assert.equal(harness.state.incidentStartedAt, startedAt);
   assert.equal(harness.state.recoveryDeadlineAt, deadlineAt);
   assert.equal(harness.state.deferredBy, "zhimadi-auto-repair");
+});
+
+test("a completed Zhimadi repair clears the stale health incident before preview", async () => {
+  const incidentStartedAt = "2026-07-30T01:00:00.000Z";
+  const harness = createHarness([
+    { error: "报表预检退出码 1：芝麻地登录态失效" },
+    {},
+  ], {
+    status: "recovering",
+    problemKey: "zhimadi-login",
+    incidentId: incidentStartedAt,
+    incidentStartedAt,
+    recoveryDeadlineAt: "2026-07-30T04:00:05.000Z",
+  });
+  const repairState = {
+    status: "auto-ok",
+    completedAt: "2026-07-30T01:15:00.000Z",
+  };
+
+  const result = await checkReportHealth({
+    ...harness.options,
+    recoveryWindowMs: 20 * 60 * 1000,
+    retryIntervalMs: 60 * 1000,
+    previewTimeoutMs: 10 * 60 * 1000,
+    isIncidentResolved: (details) => isZhimadiRepairIncidentResolved(
+      details,
+      () => repairState,
+    ),
+  });
+
+  assert.equal(result.status, "ok");
+  assert.equal(harness.previewOptions[0].verifyOnly, false);
+  assert.equal(harness.previewOptions[0].timeoutMs, 10 * 60 * 1000);
+  assert.equal(harness.writes[0].incidentStartedAt, "2026-07-30T04:00:00.000Z");
+  assert.equal(harness.writes[0].recoveryDeadlineAt, "2026-07-30T04:20:00.000Z");
+  assert.equal(harness.sends.length, 0);
 });
 
 test("a delivered Zhimadi captcha prompt suppresses duplicate health alerts", async () => {
@@ -551,7 +627,7 @@ test("an expired incident uses only the bounded final verification timeout", asy
   assert.equal(harness.state.lastAlertAt, "2026-07-30T04:22:00.000Z");
 });
 
-test("a deadline-bounded timeout preserves the previous source incident", async () => {
+test("a near-deadline timeout gets a real final verification and preserves the source", async () => {
   const harness = createHarness([
     { error: "报表预检退出码 1：抖音门店汇总超过本月总额" },
     { hang: true, killGraceMs: 3000 },
@@ -571,7 +647,7 @@ test("a deadline-bounded timeout preserves the previous source incident", async 
   });
 
   assert.equal(result.status, "failed");
-  assert.equal(harness.previewOptions[1].timeoutMs, 50 * 1000);
+  assert.equal(harness.previewOptions[1].timeoutMs, 2 * 60 * 1000);
   assert.equal(harness.state.problemKey, "douyin-report");
   assert.equal(harness.state.incidentStartedAt, "2026-07-30T04:00:00.000Z");
   assert.equal(harness.state.recoveryDeadlineAt, "2026-07-30T04:20:00.000Z");

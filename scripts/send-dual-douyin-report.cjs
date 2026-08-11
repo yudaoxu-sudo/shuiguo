@@ -7,16 +7,13 @@ const {
   extractHealthFailure,
   writeHealthFailure,
 } = require("./healthcheck-error.cjs");
+const {
+  createReportTargetDateGuard,
+  resolveReportTargetDate,
+  runGuardedAction,
+} = require("./report-target-date.cjs");
 
 const statePath = path.resolve("output/douyin-dual-report-state.json");
-
-function todayText() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
 
 function readJson(filePath) {
   try {
@@ -32,6 +29,9 @@ function writeJson(filePath, data) {
 }
 
 function runPreview(source, suffix, reuseBaseSuffix = "") {
+  const formalWrapper = !["1", "true"].includes(
+    String(process.env.NO_DINGTALK || "").toLowerCase(),
+  );
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["scripts/daily-report.cjs"], {
       cwd: process.cwd(),
@@ -39,6 +39,7 @@ function runPreview(source, suffix, reuseBaseSuffix = "") {
         ...process.env,
         NO_DINGTALK: "1",
         REPORT_FAILURE_ALERTS: "false",
+        REPORT_FORMAL_WRAPPER: formalWrapper ? "1" : "0",
         DOUYIN_SOURCE: source,
         REPORT_OUTPUT_SUFFIX: suffix,
         REPORT_REUSE_BASE_SUFFIX: reuseBaseSuffix,
@@ -62,6 +63,7 @@ function runPreview(source, suffix, reuseBaseSuffix = "") {
         const error = new Error(
           `抖音${label}版月报生成失败，退出码 ${code}：${outputTail.trim()}`,
         );
+        error.exitCode = code;
         const healthFailureMessage = extractHealthFailure(outputTail);
         if (healthFailureMessage) {
           error.healthFailureMessage = healthFailureMessage;
@@ -69,6 +71,23 @@ function runPreview(source, suffix, reuseBaseSuffix = "") {
         reject(error);
       }
     });
+  });
+}
+
+async function runDualPreviewsWithDateGuard(guard, preview = runPreview) {
+  guard("抓取前");
+  await preview("aggregate-api", "douyin-api");
+  await preview("browser", "douyin-browser", "douyin-api");
+  guard("双来源预览后");
+}
+
+function createDualReportDateGuard(reportDate, {
+  previewOnly = false,
+  currentDate,
+} = {}) {
+  return createReportTargetDateGuard(reportDate, {
+    ...(currentDate ? { currentDate } : {}),
+    label: previewOnly ? "双来源无推送验收" : "正式双来源报表",
   });
 }
 
@@ -218,10 +237,11 @@ function recordDualReportArtifactState({
 
 async function main() {
   loadEnv();
-  const date = todayText();
   const previewOnly = ["1", "true"].includes(
     String(process.env.NO_DINGTALK || "").toLowerCase(),
   );
+  const date = resolveReportTargetDate(process.env.REPORT_TARGET_DATE);
+  const guardReportDate = createDualReportDateGuard(date, { previewOnly });
   const previous = readJson(statePath);
   if (
     !previewOnly
@@ -233,8 +253,7 @@ async function main() {
     return;
   }
 
-  await runPreview("aggregate-api", "douyin-api");
-  await runPreview("browser", "douyin-browser", "douyin-api");
+  await runDualPreviewsWithDateGuard(guardReportDate);
 
   const outputDir = path.resolve("output");
   const apiMarkdownPath = path.join(
@@ -271,6 +290,7 @@ async function main() {
     comparison,
   );
 
+  guardReportDate("双来源产物写入前");
   fs.writeFileSync(
     path.join(outputDir, `dual-report-${date}-api.md`),
     apiMarkdown,
@@ -293,9 +313,13 @@ async function main() {
   }
 
   if (!state.api?.sentAt) {
-    const result = await sendDingTalkMarkdown(
-      `水果店月报（聚合接口版）${date}`,
-      apiMarkdown,
+    const result = await runGuardedAction(
+      guardReportDate,
+      "聚合接口版正式发送前",
+      () => sendDingTalkMarkdown(
+        `水果店月报（聚合接口版）${date}`,
+        apiMarkdown,
+      ),
     );
     state.api = {
       sentAt: new Date().toISOString(),
@@ -306,9 +330,13 @@ async function main() {
   }
 
   if (!state.browser?.sentAt) {
-    const result = await sendDingTalkMarkdown(
-      `水果店月报（网页版）${date}`,
-      browserMarkdown,
+    const result = await runGuardedAction(
+      guardReportDate,
+      "网页版正式发送前",
+      () => sendDingTalkMarkdown(
+        `水果店月报（网页版）${date}`,
+        browserMarkdown,
+      ),
     );
     state.browser = {
       sentAt: new Date().toISOString(),
@@ -325,13 +353,15 @@ if (require.main === module) {
   main().catch((error) => {
     console.error(error.stack || error.message);
     writeHealthFailure(error);
-    process.exit(1);
+    process.exit(error?.exitCode === 2 ? 2 : 1);
   });
 }
 
 module.exports = {
   compareDouyinSources,
   comparisonText,
+  createDualReportDateGuard,
   labelMarkdown,
   recordDualReportArtifactState,
+  runDualPreviewsWithDateGuard,
 };

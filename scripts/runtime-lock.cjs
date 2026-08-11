@@ -15,6 +15,25 @@ function isProcessRunning(pid) {
   }
 }
 
+function lockOwnerIsStale(owner, {
+  now = Date.now(),
+  staleMs = 30 * 60 * 1000,
+  lockMtimeMs = 0,
+  isRunning = isProcessRunning,
+} = {}) {
+  const ownerPid = Number(owner?.pid);
+  if (isRunning(ownerPid)) return false;
+  if (Number.isInteger(ownerPid) && ownerPid > 0) return true;
+
+  const ownerStartedAt = Date.parse(owner?.startedAt || "");
+  const orphanedAt = Number.isFinite(ownerStartedAt)
+    ? ownerStartedAt
+    : lockMtimeMs;
+  return Number.isFinite(orphanedAt)
+    && orphanedAt > 0
+    && now - orphanedAt > staleMs;
+}
+
 async function acquireLock(name, options = {}) {
   const outputDir = path.resolve("output");
   const lockDir = path.join(outputDir, `${name}.lock`);
@@ -50,9 +69,14 @@ async function acquireLock(name, options = {}) {
         owner = null;
       }
 
-      const ownerStartedAt = owner?.startedAt ? Date.parse(owner.startedAt) : 0;
-      const ownerPid = Number(owner?.pid);
-      const stale = !isProcessRunning(ownerPid) || !ownerStartedAt || Date.now() - ownerStartedAt > staleMs;
+      let lockMtimeMs;
+      try {
+        lockMtimeMs = fs.statSync(lockDir).mtimeMs;
+      } catch (statError) {
+        if (statError.code === "ENOENT") continue;
+        throw statError;
+      }
+      const stale = lockOwnerIsStale(owner, { staleMs, lockMtimeMs });
       if (stale) {
         fs.rmSync(lockDir, { recursive: true, force: true });
         continue;
@@ -76,4 +100,4 @@ async function withLock(name, options, action) {
   }
 }
 
-module.exports = { acquireLock, withLock };
+module.exports = { acquireLock, lockOwnerIsStale, withLock };
