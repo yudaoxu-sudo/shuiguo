@@ -4,8 +4,69 @@ const { chromium } = require("playwright");
 const {
   reconcileDouyinStoreRows,
 } = require("./douyin-store-reconciliation.cjs");
+const { pruneDebugArtifactsQuietly } = require("./debug-artifacts.cjs");
 
 const DEFAULT_FINANCE_URL = "https://life.douyin.com/p/finance/v2/home";
+
+function configuredTimeout(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function navigationTimeoutMs() {
+  return configuredTimeout("DOUYIN_NAVIGATION_TIMEOUT_MS", 60000);
+}
+
+function pageReadyTimeoutMs() {
+  return configuredTimeout("DOUYIN_PAGE_READY_TIMEOUT_MS", 90000);
+}
+
+function tableTimeoutMs() {
+  return configuredTimeout("DOUYIN_TABLE_TIMEOUT_MS", 60000);
+}
+
+function isDouyinPageLoadError(error) {
+  const message = String(error?.message || error);
+  return message.includes("抖音") && message.includes("加载超时");
+}
+
+function reloadCutoffMs() {
+  return configuredTimeout("DOUYIN_RELOAD_CUTOFF_MS", 5 * 60 * 1000);
+}
+
+// 整页刷新会把一次抖音读取的耗时翻倍。第一遍已经耗掉预算就直接失败，
+// 把重试留给上层退避，别让子进程被父进程 watchdog 杀在半路。
+function shouldReloadDouyinPage(error, elapsedMs, {
+  cutoffMs = reloadCutoffMs(),
+} = {}) {
+  if (!isDouyinPageLoadError(error)) return false;
+  return Number.isFinite(elapsedMs) && elapsedMs < cutoffMs;
+}
+
+async function pageSnippet(page) {
+  // 只在 catch 里被调用：自己出错绝不能顶掉真正的失败原因。
+  try {
+    const text = await page.locator("body").innerText({ timeout: 5000 })
+      .catch(() => "");
+    return String(text).slice(0, 200).replace(/\s+/g, " ");
+  } catch {
+    return "";
+  }
+}
+
+async function gotoWithRetry(page, url, options, attempts = 3) {
+  let lastError;
+  for (let index = 0; index < attempts; index += 1) {
+    try {
+      return await page.goto(url, options);
+    } catch (error) {
+      lastError = error;
+      if (index < attempts - 1) await page.waitForTimeout(3000);
+    }
+  }
+
+  throw lastError;
+}
 
 function formatDate(date = new Date()) {
   const year = date.getFullYear();
@@ -161,18 +222,28 @@ async function selectCurrentMonth(page) {
 }
 
 async function waitForFinancePage(page) {
-  await page.waitForFunction(() => {
-    const text = document.body?.innerText || "";
-    return text.includes("账单统计") || location.pathname.includes("/p/login");
-  }, null, { timeout: 60000 });
+  try {
+    await page.waitForFunction(() => {
+      const text = document.body?.innerText || "";
+      return text.includes("账单统计") || location.pathname.includes("/p/login");
+    }, null, { timeout: pageReadyTimeoutMs() });
+  } catch (error) {
+    const snippet = await pageSnippet(page);
+    throw new Error(`抖音账单统计主界面加载超时：${snippet}`, { cause: error });
+  }
 
   if (page.url().includes("/p/login")) {
     throw new Error("抖音来客登录态失效，需要运行 pnpm douyin:login 完成短信验证码登录");
   }
-  await page.getByText("账单统计", { exact: true }).waitFor({
-    state: "visible",
-    timeout: 60000,
-  });
+  try {
+    await page.getByText("账单统计", { exact: true }).waitFor({
+      state: "visible",
+      timeout: pageReadyTimeoutMs(),
+    });
+  } catch (error) {
+    const snippet = await pageSnippet(page);
+    throw new Error(`抖音账单统计主界面加载超时：${snippet}`, { cause: error });
+  }
 }
 
 async function extractMerchantDue(page) {
@@ -231,7 +302,10 @@ async function extractTable(
       }
       return Boolean(wrapper?.querySelector("tbody tr"));
     });
-  }, requiredHeaders, { timeout: 60000 });
+  }, requiredHeaders, { timeout: tableTimeoutMs() }).catch(async (error) => {
+    const snippet = await pageSnippet(page);
+    throw new Error(`${label}加载超时：${snippet}`, { cause: error });
+  });
 
   const result = await page.evaluate((headers) => {
     const normalize = (value) => String(value || "").replace(/\s+/g, "");
@@ -354,66 +428,92 @@ async function extractTable(
   return result.rows;
 }
 
+async function readDouyinBrowserOnce(page, reportDate, options = {}) {
+  await gotoWithRetry(
+    page,
+    process.env.DOUYIN_FINANCE_URL || DEFAULT_FINANCE_URL,
+    { waitUntil: "commit", timeout: navigationTimeoutMs() },
+  );
+  await waitForFinancePage(page);
+  await selectCurrentMonth(page);
+  await page.waitForTimeout(1500);
+
+  const dateTab = await firstVisible(page.getByText("按日期", { exact: true }));
+  if (dateTab) {
+    await dateTab.click();
+    await page.waitForTimeout(800);
+  }
+  const merchantDue = await extractMerchantDue(page);
+  const rawDateRows = await extractTable(
+    page,
+    ["日期", "结算状态", "商家应得(元)"],
+  );
+  const dateRows = rawDateRows.map(([date, status, merchantAmount]) => ({
+    date,
+    status,
+    merchantDue: merchantAmount,
+  }));
+  const lastDateRow = dateRows[dateRows.length - 1];
+  const dayOfMonth = Number(reportDate.slice(8, 10));
+  if (
+    lastDateRow.status.includes("待结算")
+    && dateRows.length < dayOfMonth
+  ) {
+    throw new Error("抖音待结算日期超过当前页，无法完整计算预计到账");
+  }
+
+  const storeTab = await firstVisible(page.getByText("按门店", { exact: true }));
+  if (!storeTab) throw new Error("抖音账单统计没有找到“按门店”");
+  await storeTab.click();
+  await page.getByText("按履约核销的门店进行汇总", { exact: true }).waitFor({
+    state: "visible",
+    timeout: 30000,
+  });
+  const rawStoreRows = await extractTable(
+    page,
+    ["门店", "商家应得(元)"],
+    { requireCompletePage: true, label: "抖音门店汇总" },
+  );
+  const storeRows = rawStoreRows.map(([store, merchantAmount]) => ({
+    store,
+    merchantDue: merchantAmount,
+  }));
+
+  return buildDouyinBrowserSummary({
+    reportDate,
+    merchantDue,
+    dateRows,
+    storeRows,
+    allowSyncAdjustment: options.allowSyncAdjustment === true,
+  });
+}
+
 async function readDouyinBrowser(context, monthThrough, options = {}) {
   const reportDate = monthThrough || formatDate();
   const page = await context.newPage();
+  const startedAt = Date.now();
   try {
-    await page.goto(
-      process.env.DOUYIN_FINANCE_URL || DEFAULT_FINANCE_URL,
-      { waitUntil: "commit", timeout: 60000 },
-    );
-    await waitForFinancePage(page);
-    await selectCurrentMonth(page);
-    await page.waitForTimeout(1500);
+    let lastError;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        return await readDouyinBrowserOnce(page, reportDate, options);
+      } catch (error) {
+        lastError = error;
+        if (
+          attempt === 2
+          || !shouldReloadDouyinPage(error, Date.now() - startedAt)
+        ) throw error;
 
-    const dateTab = await firstVisible(page.getByText("按日期", { exact: true }));
-    if (dateTab) {
-      await dateTab.click();
-      await page.waitForTimeout(800);
-    }
-    const merchantDue = await extractMerchantDue(page);
-    const rawDateRows = await extractTable(
-      page,
-      ["日期", "结算状态", "商家应得(元)"],
-    );
-    const dateRows = rawDateRows.map(([date, status, merchantAmount]) => ({
-      date,
-      status,
-      merchantDue: merchantAmount,
-    }));
-    const lastDateRow = dateRows[dateRows.length - 1];
-    const dayOfMonth = Number(reportDate.slice(8, 10));
-    if (
-      lastDateRow.status.includes("待结算")
-      && dateRows.length < dayOfMonth
-    ) {
-      throw new Error("抖音待结算日期超过当前页，无法完整计算预计到账");
+        console.warn(`抖音页面半加载，执行浏览器整页刷新：${error.message}`);
+        await page.reload({
+          waitUntil: "commit",
+          timeout: navigationTimeoutMs(),
+        }).catch(() => {});
+        await page.waitForTimeout(5000);
+      }
     }
 
-    const storeTab = await firstVisible(page.getByText("按门店", { exact: true }));
-    if (!storeTab) throw new Error("抖音账单统计没有找到“按门店”");
-    await storeTab.click();
-    await page.getByText("按履约核销的门店进行汇总", { exact: true }).waitFor({
-      state: "visible",
-      timeout: 30000,
-    });
-    const rawStoreRows = await extractTable(
-      page,
-      ["门店", "商家应得(元)"],
-      { requireCompletePage: true, label: "抖音门店汇总" },
-    );
-    const storeRows = rawStoreRows.map(([store, merchantAmount]) => ({
-      store,
-      merchantDue: merchantAmount,
-    }));
-
-    return buildDouyinBrowserSummary({
-      reportDate,
-      merchantDue,
-      dateRows,
-      storeRows,
-      allowSyncAdjustment: options.allowSyncAdjustment === true,
-    });
+    throw lastError;
   } catch (error) {
     const outputDir = path.resolve("output/debug");
     fs.mkdirSync(outputDir, { recursive: true });
@@ -428,6 +528,7 @@ async function readDouyinBrowser(context, monthThrough, options = {}) {
       textPath,
       `error=${error.stack || error.message || error}\n\n${bodyText.slice(0, 10000)}`,
     );
+    pruneDebugArtifactsQuietly();
     error.message = `${error.message}；调试文件 ${screenshotPath}`;
     throw error;
   } finally {
@@ -463,6 +564,12 @@ if (require.main === module) {
 module.exports = {
   assertCompleteTablePage,
   buildDouyinBrowserSummary,
+  isDouyinPageLoadError,
   moneyToCents,
+  navigationTimeoutMs,
+  pageReadyTimeoutMs,
   readDouyinBrowser,
+  reloadCutoffMs,
+  shouldReloadDouyinPage,
+  tableTimeoutMs,
 };

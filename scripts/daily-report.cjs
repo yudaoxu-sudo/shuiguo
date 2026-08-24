@@ -9,6 +9,7 @@ const { archiveMonthlyReport } = require("./report-history.cjs");
 const { withLock } = require("./runtime-lock.cjs");
 const { gotoZhimadi } = require("./zhimadi-navigation.cjs");
 const { writeHealthFailure } = require("./healthcheck-error.cjs");
+const { pruneDebugArtifactsQuietly } = require("./debug-artifacts.cjs");
 const { requestTimeoutSignal } = require("./send-dingtalk.cjs");
 const {
   persistMergedRepairRequest,
@@ -19,6 +20,10 @@ const {
   runGuardedAction,
   shouldGuardFormalReportTarget,
 } = require("./report-target-date.cjs");
+
+const processStartedAt = Date.now();
+const defaultRetryBackoffsMs = [5000, 30000, 120000];
+const defaultReportBudgetMs = 13 * 60 * 1000;
 
 const repairStatePath = path.resolve("output/zhimadi-login-repair-state.json");
 const deferredZhimadiRepairCodes = new Set([
@@ -102,6 +107,26 @@ async function gotoWithRetry(page, url, options, attempts = 3) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function reportBudgetMs(env = process.env) {
+  const value = Number(env.REPORT_TOTAL_BUDGET_MS);
+  return Number.isFinite(value) && value > 0 ? value : defaultReportBudgetMs;
+}
+
+function retryBackoffsMs(env = process.env) {
+  const configured = String(env.REPORT_RETRY_BACKOFF_MS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map(Number)
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  return configured.length > 0 ? configured : defaultRetryBackoffsMs;
+}
+
+function retryBackoffFor(attempt, backoffs = retryBackoffsMs()) {
+  if (backoffs.length === 0) return 0;
+  return backoffs[Math.min(attempt, backoffs.length) - 1];
 }
 
 function readJson(filePath) {
@@ -300,6 +325,7 @@ async function saveDebugArtifacts(page, label, error) {
     pageText,
   ].join("\n"));
 
+  pruneDebugArtifactsQuietly({ outputDir: path.resolve("output") });
   return { screenshotPath, textPath };
 }
 
@@ -316,9 +342,16 @@ async function withFreshPage(context, label, action) {
   }
 }
 
-async function retryStep(name, action, attempts = 3) {
+async function retryStep(name, action, attempts = 3, {
+  backoffs = retryBackoffsMs(),
+  deadlineAt = processStartedAt + reportBudgetMs(),
+  now = Date.now,
+  sleep = delay,
+} = {}) {
   let lastError;
+  let used = 0;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    used = attempt;
     try {
       if (attempt > 1) console.log(`${name}第 ${attempt} 次重试`);
       return await action(attempt, attempts);
@@ -326,11 +359,20 @@ async function retryStep(name, action, attempts = 3) {
       lastError = error;
       console.warn(`${name}第 ${attempt} 次失败：${error.message}`);
       if (isZhimadiLoginError(error) || isDouyinLoginError(error)) throw error;
-      if (attempt < attempts) await delay(5000);
+      if (attempt >= attempts) break;
+
+      // 退避重试，但绝不睡过本次报表的总预算，避免被父进程 watchdog 直接杀掉。
+      const backoffMs = retryBackoffFor(attempt, backoffs);
+      const remainingMs = deadlineAt - now();
+      if (remainingMs <= backoffMs) {
+        console.warn(`${name}剩余时间不足，停止重试`);
+        break;
+      }
+      await sleep(backoffMs);
     }
   }
 
-  throw new Error(`${name}连续 ${attempts} 次失败：${lastError?.message || "未知错误"}`);
+  throw new Error(`${name}连续 ${used} 次失败：${lastError?.message || "未知错误"}`);
 }
 
 async function readZhimadi(page) {
@@ -737,5 +779,9 @@ module.exports = {
   isZhimadiRepairDeferredError,
   persistRequesterReportResumeOutcome,
   repairCanResumeInProcess,
+  reportBudgetMs,
+  retryBackoffFor,
+  retryBackoffsMs,
+  retryStep,
   shouldRequestReportAfterLogin,
 };
