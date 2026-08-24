@@ -9,12 +9,11 @@ function debugDir(outputDir = path.resolve("output")) {
   return path.join(path.resolve(outputDir), "debug");
 }
 
+// 0 或负数表示关闭清理，不是"立刻删光"。
 function retentionMs(env = process.env) {
   const days = Number(env.DEBUG_ARTIFACT_RETENTION_DAYS);
-  const safeDays = Number.isFinite(days) && days >= 0
-    ? days
-    : defaultRetentionDays;
-  return safeDays * 24 * 60 * 60 * 1000;
+  const safeDays = Number.isFinite(days) ? days : defaultRetentionDays;
+  return safeDays > 0 ? safeDays * 24 * 60 * 60 * 1000 : 0;
 }
 
 function pruneDebugArtifacts({
@@ -22,6 +21,8 @@ function pruneDebugArtifacts({
   now = Date.now(),
   maxAgeMs = retentionMs(),
 } = {}) {
+  if (!(maxAgeMs > 0)) return { removed: 0, kept: 0 };
+
   const directory = debugDir(outputDir);
   let entries;
   try {

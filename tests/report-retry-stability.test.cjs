@@ -10,7 +10,10 @@ const {
   retryBackoffsMs,
   retryStep,
 } = require("../scripts/daily-report.cjs");
-const { pruneDebugArtifacts } = require("../scripts/debug-artifacts.cjs");
+const {
+  pruneDebugArtifacts,
+  retentionMs,
+} = require("../scripts/debug-artifacts.cjs");
 const {
   isDouyinPageLoadError,
   navigationTimeoutMs,
@@ -251,6 +254,25 @@ test("leaves directories and non-artifact files inside output/debug alone", () =
   assert.equal(result.removed, 0);
   assert.equal(fs.existsSync(nestedFile), true);
   assert.equal(fs.existsSync(notes), true);
+
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("treats a zero retention setting as off, never as delete everything", () => {
+  const { root, outputDir } = makeOutputTree();
+  const debugDir = path.join(outputDir, "debug");
+  const aged = new Date("2020-01-01T00:00:00.000Z");
+  const shot = path.join(debugDir, "douyin-2020-01-01-1.png");
+  fs.writeFileSync(shot, "content");
+  fs.utimesSync(shot, aged, aged);
+
+  assert.equal(retentionMs({ DEBUG_ARTIFACT_RETENTION_DAYS: "0" }), 0);
+  assert.equal(retentionMs({ DEBUG_ARTIFACT_RETENTION_DAYS: "-3" }), 0);
+  assert.equal(retentionMs({}), 7 * 24 * 60 * 60 * 1000);
+
+  const result = pruneDebugArtifacts({ outputDir, now: Date.now(), maxAgeMs: 0 });
+  assert.deepEqual(result, { removed: 0, kept: 0 });
+  assert.equal(fs.existsSync(shot), true);
 
   fs.rmSync(root, { recursive: true, force: true });
 });
