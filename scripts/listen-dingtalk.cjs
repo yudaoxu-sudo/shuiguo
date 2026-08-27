@@ -36,6 +36,7 @@ const { isLemengLoginCommand, loginLemeng } = require("./lemeng-login.cjs");
 const {
   chunkText,
   isPurchaseDetailCommand,
+  isReportPreviewCommand,
 } = require("./zhimadi-purchase-detail.cjs");
 
 const heartbeatPath = path.resolve("output/listener-heartbeat.json");
@@ -1863,6 +1864,45 @@ async function main() {
 
     // 乐檬是唯一没有自助登录入口的来源，验证码只会发到店主手机上。
     // 单聊里回一句“乐檬码123456”就能完成登录，不必进群、也不必开终端。
+    if (isReportPreviewCommand(text)) {
+      if (!rememberCommand(commandKey(message, text))) {
+        console.log(`[${new Date().toISOString()}] duplicate preview command ignored`);
+        return;
+      }
+      console.log(`[${new Date().toISOString()}] report preview command accepted`);
+      await sendBestEffort("月报预览回执", () => sendSessionText(
+        client, message.sessionWebhook, message.senderStaffId,
+        "收到，正在生成月报预览。只回给你，不会发群里，约两分钟。",
+      ));
+      void (async () => {
+        try {
+          const output = await runReportChild(["scripts/daily-report.cjs"], {
+            label: "月报预览",
+            env: {
+              ...process.env,
+              NO_DINGTALK: "1",
+              REPORT_FAILURE_ALERTS: "false",
+              REPORT_MANAGED_BY_LISTENER: "1",
+              REPORT_INCLUDE_PURCHASE: "1",
+              REPORT_TARGET_DATE: localDateText(),
+              REPORT_OUTPUT_SUFFIX: "preview",
+            },
+          });
+          const body = String(output || "").split("### 水果店月报").slice(1).join("### 水果店月报");
+          const text2 = body ? `### 水果店月报${body}` : String(output || "").slice(-3000);
+          for (const piece of chunkText(text2.trim())) {
+            await sendSessionText(client, message.sessionWebhook, message.senderStaffId, piece);
+          }
+        } catch (error) {
+          await sendBestEffort("月报预览失败", () => sendSessionText(
+            client, message.sessionWebhook, message.senderStaffId,
+            `月报预览失败：${String(error.message || error).slice(0, 200)}`,
+          ));
+        }
+      })();
+      return;
+    }
+
     if (isPurchaseDetailCommand(text)) {
       if (!rememberCommand(commandKey(message, text))) {
         console.log(`[${new Date().toISOString()}] duplicate purchase command ignored`);

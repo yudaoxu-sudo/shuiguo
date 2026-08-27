@@ -175,6 +175,13 @@ async function fetchPurchaseRows(page, { monthStart, today, gotoZhimadi }) {
 }
 
 // 群里“666”是月报口令，这里只认“进货”，且不能带数字，避免和验证码、月报撞车。
+// 私聊预览月报：跑一份完整的，但绝不推群，只回到当前会话。
+function isReportPreviewCommand(text) {
+  const value = String(text || "");
+  if (/\d/.test(value)) return false;
+  return /月报预览|预览月报|测试月报|月报测试/.test(value);
+}
+
 function isPurchaseDetailCommand(text) {
   const value = String(text || "");
   if (!/进货/.test(value)) return false;
@@ -201,6 +208,7 @@ function chunkText(text, maxChars = 3000) {
 
 module.exports = {
   chunkText,
+  isReportPreviewCommand,
   isPurchaseDetailCommand,
   aggregatePurchaseRows,
   fetchPurchaseRows,

@@ -748,8 +748,11 @@ async function runReportOnce(outputDir) {
       }
       const markdown = buildMarkdown(dateText, zhimadi, lemeng, douyin);
       // 只有夜间自动任务带进货明细：@666 是人工临时要月报，不该多这一大段。
+      // 私聊预览要看完整的一晚长什么样，所以留一个显式开关。
       const isScheduledRun = process.env.REPORT_MANAGED_BY_SCHEDULED === "1";
-      const purchaseSection = isScheduledRun
+      const includePurchase = isScheduledRun
+        || process.env.REPORT_INCLUDE_PURCHASE === "1";
+      const purchaseSection = includePurchase
         ? await buildPurchaseSection(context, dateText).catch((error) => {
           console.warn(`门店进货明细读取失败，本次月报不带该板块：${error.message}`);
           return "";

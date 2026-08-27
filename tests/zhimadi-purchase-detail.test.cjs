@@ -7,6 +7,7 @@ const {
   formatMoney,
   formatQty,
   isPurchaseDetailCommand,
+  isReportPreviewCommand,
   renderPurchaseDetail,
 } = require("../scripts/zhimadi-purchase-detail.cjs");
 
@@ -142,4 +143,16 @@ test("ends every DingTalk line with a hard break, and none in plain text", () =>
 
   const plain = renderPurchaseDetail(s, "2026-08-27", { plain: true });
   assert.equal(plain.split("\n").filter((l) => l.endsWith(" ")).length, 0);
+});
+
+test("tells a private preview apart from the report and restock commands", () => {
+  assert.equal(isReportPreviewCommand("月报预览"), true);
+  assert.equal(isReportPreviewCommand("预览月报"), true);
+  assert.equal(isReportPreviewCommand("测试月报"), true);
+  assert.equal(isReportPreviewCommand("@水果店月报月报预览"), true);
+  // 666 必须仍然是正式月报，预览不能把它抢走。
+  assert.equal(isReportPreviewCommand("666"), false);
+  assert.equal(isReportPreviewCommand("@水果店月报666"), false);
+  assert.equal(isReportPreviewCommand("进货"), false);
+  assert.equal(isPurchaseDetailCommand("月报预览"), false);
 });
