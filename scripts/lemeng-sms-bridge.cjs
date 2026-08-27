@@ -15,20 +15,20 @@ function extractLemengSmsCode(text) {
   return match ? match[1] : null;
 }
 
+// listener 会把消息里的空白全部删掉，@机器人 和正文会连成一串，
+// 所以这里只看有没有“乐檬”两个字，不做分词。
 function isLemengLoginCommand(text) {
-  const value = String(text || "").replace(/@\S+/g, "").trim();
-  if (!value) return false;
+  const value = String(text || "");
+  if (!value.includes("乐檬")) return false;
   if (extractLemengSmsCode(value)) return false;
-  if (/\d/.test(value)) return false;
-  return commandPattern.test(value);
+  return !/\d/.test(value);
 }
 
 // 触发登录之后的十分钟内，店主直接发一串数字就当验证码，不用再打前缀。
 // “666” 永远是月报口令，不会被当成验证码。
 function extractPendingSmsCode(text, pendingSince, { now = Date.now(), ttlMs = pendingTtlMs } = {}) {
   if (!pendingSince || now - pendingSince > ttlMs) return null;
-  const value = String(text || "").replace(/@\S+/g, "");
-  const runs = value.match(/\d{4,8}/g) || [];
+  const runs = String(text || "").match(/\d{4,8}/g) || [];
   if (runs.length !== 1) return null;
   if (/^6+$/.test(runs[0])) return null;
   return runs[0];

@@ -88,3 +88,16 @@ test("ignores an ambiguous message carrying several numbers", () => {
   const now = Date.now();
   assert.equal(extractPendingSmsCode("报表 2026 1234", now, { now }), null);
 });
+
+// listener 的 messageText 会删掉全部空白，@机器人 和正文会连成一串。
+test("still sees the request when the mention is glued to the word", () => {
+  assert.equal(isLemengLoginCommand("@水果店月报乐檬"), true);
+  assert.equal(isLemengLoginCommand("乐檬"), true);
+  assert.equal(isLemengLoginCommand("@水果店月报乐檬登录"), true);
+});
+
+test("still finds a bare code when the mention is glued to the digits", () => {
+  const now = Date.now();
+  assert.equal(extractPendingSmsCode("@水果店月报123456", now, { now }), "123456");
+  assert.equal(extractLemengSmsCode("@水果店月报乐檬码123456"), "123456");
+});

@@ -1855,12 +1855,53 @@ async function main() {
     // 单聊里回一句“乐檬码123456”就能完成登录，不必进群、也不必开终端。
     if (isLemengLoginCommand(text)) {
       lemengPendingSince = Date.now();
-      startLemengLogin({ cwd: process.cwd() });
-      await sendBestEffort("乐檬登录回复", () => sendSessionText(
+      console.log(`[${new Date().toISOString()}] lemeng login command accepted`);
+      // 先回执再干活：店主要先确认机器人听见了。
+      await sendBestEffort("乐檬收到回执", () => sendSessionText(
         client,
         message.sessionWebhook,
         message.senderStaffId,
-        "已让乐檬发送短信验证码，收到后直接把数字发过来就行。",
+        "收到，正在让乐檬发送短信验证码，请稍等十几秒。",
+      ));
+      startLemengLogin({ cwd: process.cwd() });
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        const status = readLemengLoginStatus();
+        if (status.state === "waiting-code") {
+          await sendBestEffort("乐檬短信已发", () => sendSessionText(
+            client,
+            message.sessionWebhook,
+            message.senderStaffId,
+            "短信已发出，收到后直接把数字发过来。",
+          ));
+          return;
+        }
+        if (status.state === "ok") {
+          lemengPendingSince = null;
+          await sendBestEffort("乐檬无需登录", () => sendSessionText(
+            client,
+            message.sessionWebhook,
+            message.senderStaffId,
+            "乐檬本来就是登录着的，不用验证码。",
+          ));
+          return;
+        }
+        if (status.state === "failed") {
+          lemengPendingSince = null;
+          await sendBestEffort("乐檬登录启动失败", () => sendSessionText(
+            client,
+            message.sessionWebhook,
+            message.senderStaffId,
+            `乐檬登录没能开始：${status.message}`,
+          ));
+          return;
+        }
+      }
+      await sendBestEffort("乐檬短信超时", () => sendSessionText(
+        client,
+        message.sessionWebhook,
+        message.senderStaffId,
+        "乐檬那边响应有点慢，收到短信直接发数字，或者再发一次“乐檬”。",
       ));
       return;
     }
@@ -1869,6 +1910,7 @@ async function main() {
       || extractPendingSmsCode(text, lemengPendingSince);
     if (lemengSmsCode) {
       lemengPendingSince = null;
+      console.log(`[${new Date().toISOString()}] lemeng sms code accepted`);
       try {
         deliverLemengSmsCode(lemengSmsCode);
       } catch (error) {
