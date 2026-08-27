@@ -13,6 +13,11 @@ const {
   isLemengLoginUrl,
   isLemengSessionExpiredText,
 } = require("./lemeng-login.cjs");
+const {
+  aggregatePurchaseRows,
+  fetchPurchaseRows,
+  renderPurchaseDetail,
+} = require("./zhimadi-purchase-detail.cjs");
 const { pruneDebugArtifactsQuietly } = require("./debug-artifacts.cjs");
 const { requestTimeoutSignal } = require("./send-dingtalk.cjs");
 const {
@@ -668,6 +673,21 @@ async function sendDingTalk(markdown, options = {}) {
   console.log(result);
 }
 
+
+// 门店进货明细是月报后面的附加板块。它读的是另一张报表，
+// 读不到时只跳过这一段，绝不能让正式月报发不出去。
+async function buildPurchaseSection(context, dateText) {
+  const monthStart = monthStartText();
+  return withFreshPage(context, "zhimadi-purchase", async (page) => {
+    const rows = await fetchPurchaseRows(page, {
+      monthStart,
+      today: dateText,
+      gotoZhimadi,
+    });
+    return renderPurchaseDetail(aggregatePurchaseRows(rows, dateText), dateText);
+  });
+}
+
 async function runReportOnce(outputDir) {
   const guardReportDate = shouldGuardFormalReportTarget()
     ? createReportTargetDateGuard(
@@ -726,7 +746,15 @@ async function runReportOnce(outputDir) {
           JSON.stringify(douyin, null, 2),
         );
       }
-      const markdown = buildMarkdown(dateText, zhimadi, lemeng, douyin);
+      const baseMarkdown = buildMarkdown(dateText, zhimadi, lemeng, douyin);
+      const purchaseSection = await buildPurchaseSection(context, dateText)
+        .catch((error) => {
+          console.warn(`门店进货明细读取失败，本次月报不带该板块：${error.message}`);
+          return "";
+        });
+      const markdown = purchaseSection
+        ? `${baseMarkdown}\n\n${purchaseSection}`
+        : baseMarkdown;
       const reportPath = path.join(outputDir, `monthly-report-${dateText}${suffix}.md`);
       fs.writeFileSync(reportPath, markdown);
       archiveMonthlyReport({

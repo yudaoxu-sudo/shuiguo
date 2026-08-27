@@ -83,3 +83,28 @@ test("splits a long report between stores, never mid-line", () => {
   assert.equal(chunks.join("\n\n"), text);
   chunks.forEach((c) => assert.equal(c.startsWith("\n"), false));
 });
+
+test("keeps the phone view short by folding the tail into one line", () => {
+  const many = [];
+  for (let i = 0; i < 9; i += 1) {
+    many.push({
+      day: "2026-08-27", store: "水木花都店", product: `商品${i}`,
+      unit: "件", qty: String(10 - i), amount: "100",
+    });
+  }
+  const s = aggregatePurchaseRows(many, "2026-08-27");
+  const text = renderPurchaseDetail(s, "2026-08-27", { plain: true, storeTop: 5, warehouseTop: 3 });
+  assert.match(text, /商品0 10｜10/);
+  assert.equal(text.includes("商品5 5｜5"), false, "第 6 个商品不该单独列出");
+  assert.match(text, /其余 4 项 14 件/);
+  assert.match(text, /其余 6 项 27 件/);
+});
+
+test("says nothing about a tail that does not exist", () => {
+  const s = aggregatePurchaseRows(
+    [{ day: "2026-08-27", store: "白溪店", product: "西梅", unit: "件", qty: "5", amount: "100" }],
+    "2026-08-27",
+  );
+  const text = renderPurchaseDetail(s, "2026-08-27", { plain: true });
+  assert.equal(text.includes("其余"), false);
+});
