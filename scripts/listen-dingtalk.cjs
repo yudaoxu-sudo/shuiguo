@@ -32,6 +32,13 @@ const {
   writeJsonAtomic,
   writeSmsCode,
 } = require("./douyin-sms-repair.cjs");
+const {
+  deliverLemengSmsCode,
+  extractLemengSmsCode,
+  isLemengLoginCommand,
+  readLemengLoginStatus,
+  startLemengLogin,
+} = require("./lemeng-sms-bridge.cjs");
 
 const heartbeatPath = path.resolve("output/listener-heartbeat.json");
 const commandStatePath = path.resolve("output/listener-command-state.json");
@@ -1839,6 +1846,62 @@ async function main() {
         console.error(error.stack || error.message);
         await sendSessionText(client, message.sessionWebhook, message.senderStaffId, `芝麻地登录修复启动失败：${error.message}`);
       }
+      return;
+    }
+
+    // 乐檬是唯一没有自助登录入口的来源，验证码只会发到店主手机上。
+    // 单聊里回一句“乐檬码123456”就能完成登录，不必进群、也不必开终端。
+    if (isLemengLoginCommand(text)) {
+      startLemengLogin({ cwd: process.cwd() });
+      await sendBestEffort("乐檬登录回复", () => sendSessionText(
+        client,
+        message.sessionWebhook,
+        message.senderStaffId,
+        "已让乐檬发送短信验证码，收到后回复：乐檬码123456",
+      ));
+      return;
+    }
+
+    const lemengSmsCode = extractLemengSmsCode(text);
+    if (lemengSmsCode) {
+      try {
+        deliverLemengSmsCode(lemengSmsCode);
+      } catch (error) {
+        await sendBestEffort("乐檬验证码格式回复", () => sendSessionText(
+          client,
+          message.sessionWebhook,
+          message.senderStaffId,
+          `这个验证码我没收下：${error.message}`,
+        ));
+        return;
+      }
+      await sendBestEffort("乐檬验证码回执", () => sendSessionText(
+        client,
+        message.sessionWebhook,
+        message.senderStaffId,
+        "收到验证码，正在完成乐檬登录。",
+      ));
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        const status = readLemengLoginStatus();
+        if (status.state === "ok" || status.state === "failed") {
+          await sendBestEffort("乐檬登录结果", () => sendSessionText(
+            client,
+            message.sessionWebhook,
+            message.senderStaffId,
+            status.state === "ok"
+              ? "乐檬登录成功，报表已经可以正常读取了。"
+              : `乐檬登录失败：${status.message}`,
+          ));
+          return;
+        }
+      }
+      await sendBestEffort("乐檬登录仍在进行", () => sendSessionText(
+        client,
+        message.sessionWebhook,
+        message.senderStaffId,
+        "乐檬登录还在进行，稍后回复“乐檬登录”可以重来一次。",
+      ));
       return;
     }
 
