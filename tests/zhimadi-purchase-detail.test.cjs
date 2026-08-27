@@ -9,6 +9,7 @@ const {
   isPurchaseDetailCommand,
   isReportPreviewCommand,
   renderPurchaseDetail,
+  stripBotMention,
 } = require("../scripts/zhimadi-purchase-detail.cjs");
 
 const rows = [
@@ -145,14 +146,27 @@ test("ends every DingTalk line with a hard break, and none in plain text", () =>
   assert.equal(plain.split("\n").filter((l) => l.endsWith(" ")).length, 0);
 });
 
-test("tells a private preview apart from the report and restock commands", () => {
+test("answers a bare 月报 with the preview", () => {
+  assert.equal(isReportPreviewCommand("月报"), true);
   assert.equal(isReportPreviewCommand("月报预览"), true);
   assert.equal(isReportPreviewCommand("预览月报"), true);
   assert.equal(isReportPreviewCommand("测试月报"), true);
-  assert.equal(isReportPreviewCommand("@水果店月报月报预览"), true);
-  // 666 必须仍然是正式月报，预览不能把它抢走。
+});
+
+// 机器人自己叫「水果店月报」，@ 它就把“月报”带进正文，
+// 不剥离的话每一次 @ 都会被预览抢走。
+test("does not read the bot's own name as a command", () => {
+  assert.equal(stripBotMention("@水果店月报进货"), "进货");
+  assert.equal(stripBotMention("@水果店月报"), "");
+
+  assert.equal(isReportPreviewCommand("@水果店月报"), false, "光 @ 不打字不能触发");
+  assert.equal(isReportPreviewCommand("@水果店月报月报"), true, "@ 之后真的打了月报");
+});
+
+test("leaves 666 and 进货 to their own handlers", () => {
   assert.equal(isReportPreviewCommand("666"), false);
   assert.equal(isReportPreviewCommand("@水果店月报666"), false);
-  assert.equal(isReportPreviewCommand("进货"), false);
-  assert.equal(isPurchaseDetailCommand("月报预览"), false);
+  assert.equal(isReportPreviewCommand("@水果店月报进货"), false);
+  assert.equal(isPurchaseDetailCommand("@水果店月报进货"), true);
+  assert.equal(isPurchaseDetailCommand("月报"), false);
 });

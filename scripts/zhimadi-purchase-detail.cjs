@@ -175,15 +175,24 @@ async function fetchPurchaseRows(page, { monthStart, today, gotoZhimadi }) {
 }
 
 // 群里“666”是月报口令，这里只认“进货”，且不能带数字，避免和验证码、月报撞车。
-// 私聊预览月报：跑一份完整的，但绝不推群，只回到当前会话。
+// 机器人自己就叫「水果店月报」，群里 @ 它，正文里必然带“月报”两个字。
+// 不先摘掉这段，"月报" 会把 @机器人 进货 之类的指令全抢走。
+const botName = process.env.DINGTALK_BOT_NAME || "水果店月报";
+
+function stripBotMention(text) {
+  return String(text || "").split(`@${botName}`).join("").trim();
+}
+
+// 预览月报：跑一份完整的，但绝不推群，只回到当前会话。
 function isReportPreviewCommand(text) {
-  const value = String(text || "");
-  if (/\d/.test(value)) return false;
-  return /月报预览|预览月报|测试月报|月报测试/.test(value);
+  const value = stripBotMention(text);
+  if (!value || /\d/.test(value)) return false;
+  return /^月报$/.test(value)
+    || /月报预览|预览月报|测试月报|月报测试/.test(value);
 }
 
 function isPurchaseDetailCommand(text) {
-  const value = String(text || "");
+  const value = stripBotMention(text);
   if (!/进货/.test(value)) return false;
   return !/\d/.test(value);
 }
@@ -209,6 +218,7 @@ function chunkText(text, maxChars = 3000) {
 module.exports = {
   chunkText,
   isReportPreviewCommand,
+  stripBotMention,
   isPurchaseDetailCommand,
   aggregatePurchaseRows,
   fetchPurchaseRows,
