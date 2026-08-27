@@ -32,14 +32,7 @@ const {
   writeJsonAtomic,
   writeSmsCode,
 } = require("./douyin-sms-repair.cjs");
-const {
-  deliverLemengSmsCode,
-  extractLemengSmsCode,
-  extractPendingSmsCode,
-  isLemengLoginCommand,
-  readLemengLoginStatus,
-  startLemengLogin,
-} = require("./lemeng-sms-bridge.cjs");
+const { isLemengLoginCommand, loginLemeng } = require("./lemeng-login.cjs");
 const {
   chunkText,
   isPurchaseDetailCommand,
@@ -1338,7 +1331,6 @@ async function main() {
   }
 
   let running = false;
-  let lemengPendingSince = null;
   let loginSession = null;
   let shuttingDown = false;
 
@@ -1905,105 +1897,37 @@ async function main() {
         console.log(`[${new Date().toISOString()}] duplicate lemeng command ignored`);
         return;
       }
-      lemengPendingSince = Date.now();
       console.log(`[${new Date().toISOString()}] lemeng login command accepted`);
-      // 先回执再干活：店主要先确认机器人听见了。
       await sendBestEffort("乐檬收到回执", () => sendSessionText(
-        client,
-        message.sessionWebhook,
-        message.senderStaffId,
-        "收到，正在让乐檬发送短信验证码，请稍等十几秒。",
+        client, message.sessionWebhook, message.senderStaffId,
+        "收到，正在取乐檬登录二维码，十几秒后发给你。",
       ));
-      startLemengLogin({ cwd: process.cwd() });
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 3000));
-        const status = readLemengLoginStatus();
-        if (status.state === "waiting-code") {
-          await sendBestEffort("乐檬短信已发", () => sendSessionText(
-            client,
-            message.sessionWebhook,
-            message.senderStaffId,
-            "短信已发出，收到后直接把数字发过来。",
+      // 取码加等扫描要几分钟，超过钉钉的 ack 窗口，所以放后台跑。
+      void (async () => {
+        try {
+          const status = await loginLemeng({
+            onQr: async (qrPath) => {
+              const mediaId = await uploadDingTalkImage(client, qrPath);
+              await sendGroupImage(client, message, mediaId);
+              await sendSessionText(
+                client, message.sessionWebhook, message.senderStaffId,
+                "用乐檬零售APP扫这个码，三分钟内有效。",
+              );
+            },
+          });
+          await sendSessionText(
+            client, message.sessionWebhook, message.senderStaffId,
+            status === "already-ok"
+              ? "乐檬本来就登录着，不用扫码。"
+              : "乐檬登录成功，报表可以正常读取了。",
+          );
+        } catch (error) {
+          await sendBestEffort("乐檬登录失败", () => sendSessionText(
+            client, message.sessionWebhook, message.senderStaffId,
+            `乐檬登录没成功：${String(error.message || error).slice(0, 150)}`,
           ));
-          return;
         }
-        if (status.state === "ok") {
-          lemengPendingSince = null;
-          await sendBestEffort("乐檬无需登录", () => sendSessionText(
-            client,
-            message.sessionWebhook,
-            message.senderStaffId,
-            "乐檬本来就是登录着的，不用验证码。",
-          ));
-          return;
-        }
-        if (status.state === "failed") {
-          lemengPendingSince = null;
-          await sendBestEffort("乐檬登录启动失败", () => sendSessionText(
-            client,
-            message.sessionWebhook,
-            message.senderStaffId,
-            `乐檬登录没能开始：${status.message}`,
-          ));
-          return;
-        }
-      }
-      await sendBestEffort("乐檬短信超时", () => sendSessionText(
-        client,
-        message.sessionWebhook,
-        message.senderStaffId,
-        "乐檬那边响应有点慢，收到短信直接发数字，或者再发一次“乐檬”。",
-      ));
-      return;
-    }
-
-    const lemengSmsCode = extractLemengSmsCode(text)
-      || extractPendingSmsCode(text, lemengPendingSince);
-    if (lemengSmsCode) {
-      if (!rememberCommand(commandKey(message, text))) {
-        console.log(`[${new Date().toISOString()}] duplicate lemeng code ignored`);
-        return;
-      }
-      lemengPendingSince = null;
-      console.log(`[${new Date().toISOString()}] lemeng sms code accepted`);
-      try {
-        deliverLemengSmsCode(lemengSmsCode);
-      } catch (error) {
-        await sendBestEffort("乐檬验证码格式回复", () => sendSessionText(
-          client,
-          message.sessionWebhook,
-          message.senderStaffId,
-          `这个验证码我没收下：${error.message}`,
-        ));
-        return;
-      }
-      await sendBestEffort("乐檬验证码回执", () => sendSessionText(
-        client,
-        message.sessionWebhook,
-        message.senderStaffId,
-        "收到验证码，正在完成乐檬登录。",
-      ));
-      for (let attempt = 0; attempt < 40; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 3000));
-        const status = readLemengLoginStatus();
-        if (status.state === "ok" || status.state === "failed") {
-          await sendBestEffort("乐檬登录结果", () => sendSessionText(
-            client,
-            message.sessionWebhook,
-            message.senderStaffId,
-            status.state === "ok"
-              ? "乐檬登录成功，报表已经可以正常读取了。"
-              : `乐檬登录失败：${status.message}`,
-          ));
-          return;
-        }
-      }
-      await sendBestEffort("乐檬登录仍在进行", () => sendSessionText(
-        client,
-        message.sessionWebhook,
-        message.senderStaffId,
-        "乐檬登录还在进行，稍后回复“乐檬登录”可以重来一次。",
-      ));
+      })();
       return;
     }
 
