@@ -122,3 +122,24 @@ test("says nothing about a tail that does not exist", () => {
   const text = renderPurchaseDetail(s, "2026-08-27", { plain: true });
   assert.equal(text.includes("其余"), false);
 });
+
+test("ends every DingTalk line with a hard break, and none in plain text", () => {
+  const s = aggregatePurchaseRows(
+    [
+      { day: "2026-08-27", store: "水木花都店", product: "西梅小箱", unit: "件", qty: "200", amount: "1" },
+      { day: "2026-08-27", store: "水木花都店", product: "阳光玫瑰", unit: "件", qty: "144", amount: "1" },
+    ],
+    "2026-08-27",
+  );
+
+  // 钉钉 markdown 单个 \n 不成行，商品会挤成一整段。
+  const md = renderPurchaseDetail(s, "2026-08-27");
+  const productLines = md.split("\n").filter((l) => l.includes("｜") && /\d/.test(l));
+  assert.ok(productLines.length >= 2);
+  productLines.forEach((line) => {
+    assert.ok(line.endsWith("  "), `这行没有硬换行：${JSON.stringify(line)}`);
+  });
+
+  const plain = renderPurchaseDetail(s, "2026-08-27", { plain: true });
+  assert.equal(plain.split("\n").filter((l) => l.endsWith(" ")).length, 0);
+});

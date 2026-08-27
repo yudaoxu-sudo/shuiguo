@@ -80,6 +80,8 @@ function aggregatePurchaseRows(rows, today) {
 }
 
 // 钉钉单聊只能发纯文本，markdown 记号会原样显示出来，所以要能关掉。
+// 钉钉 markdown 里单个换行不成行，行尾要留两个空格才是硬换行。
+// 纯文本（单聊）反而不能带这两个空格。
 function renderPurchaseDetail(summary, dateText, {
   plain = false,
   storeTop = Infinity,
@@ -88,42 +90,43 @@ function renderPurchaseDetail(summary, dateText, {
   const short = String(dateText || "").slice(5);
   const h = (text) => (plain ? text : `#### ${text}`);
   const b = (text) => (plain ? text : `**${text}**`);
+  const br = (text) => (plain ? text : `${text}  `);
   const lines = [
     h(`门店进货明细 ${short}`),
-    "今日｜本月（件）",
+    br("今日｜本月（件）"),
     "",
   ];
 
   for (const store of summary.stores) {
-    lines.push(b(store.store));
+    lines.push(br(b(store.store)));
     const shown = store.items.slice(0, storeTop);
     for (const item of shown) {
-      lines.push(`${item.product} ${formatQty(item.day)}｜${formatQty(item.month)}`);
+      lines.push(br(`${item.product} ${formatQty(item.day)}｜${formatQty(item.month)}`));
     }
     const rest = store.items.slice(storeTop);
     if (rest.length) {
       const restQty = rest.reduce((sum, i) => sum + i.day, 0);
-      lines.push(`其余 ${rest.length} 项 ${formatQty(restQty)} 件`);
+      lines.push(br(`其余 ${rest.length} 项 ${formatQty(restQty)} 件`));
     }
     lines.push(
-      `小计 当日 ${formatMoney(store.dayMoney)}｜本月 ${formatMoney(store.monthMoney)}`,
+      br(`小计 当日 ${formatMoney(store.dayMoney)}｜本月 ${formatMoney(store.monthMoney)}`),
       "",
     );
   }
 
-  lines.push(h(`仓库出货汇总 ${short}`), "按今日出货量排名，今日｜本月（件）", "");
+  lines.push(h(`仓库出货汇总 ${short}`), br("按今日出货量排名，今日｜本月（件）"), "");
   const top = summary.warehouse.slice(0, warehouseTop);
   top.forEach((item, index) => {
-    lines.push(`${index + 1}. ${item.product} ${formatQty(item.day)}｜${formatQty(item.month)}`);
+    lines.push(br(`${index + 1}. ${item.product} ${formatQty(item.day)}｜${formatQty(item.month)}`));
   });
   const restWarehouse = summary.warehouse.slice(warehouseTop);
   if (restWarehouse.length) {
     const restQty = restWarehouse.reduce((sum, i) => sum + i.day, 0);
-    lines.push(`其余 ${restWarehouse.length} 项 ${formatQty(restQty)} 件`);
+    lines.push(br(`其余 ${restWarehouse.length} 项 ${formatQty(restQty)} 件`));
   }
   lines.push(
     "",
-    `合计 当日 ${formatMoney(summary.dayMoney)}｜本月 ${formatMoney(summary.monthMoney)}`,
+    br(`合计 当日 ${formatMoney(summary.dayMoney)}｜本月 ${formatMoney(summary.monthMoney)}`),
   );
 
   return lines.join("\n");

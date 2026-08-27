@@ -746,17 +746,20 @@ async function runReportOnce(outputDir) {
           JSON.stringify(douyin, null, 2),
         );
       }
-      const baseMarkdown = buildMarkdown(dateText, zhimadi, lemeng, douyin);
-      const purchaseSection = await buildPurchaseSection(context, dateText)
-        .catch((error) => {
+      const markdown = buildMarkdown(dateText, zhimadi, lemeng, douyin);
+      // 只有夜间自动任务带进货明细：@666 是人工临时要月报，不该多这一大段。
+      const isScheduledRun = process.env.REPORT_MANAGED_BY_SCHEDULED === "1";
+      const purchaseSection = isScheduledRun
+        ? await buildPurchaseSection(context, dateText).catch((error) => {
           console.warn(`门店进货明细读取失败，本次月报不带该板块：${error.message}`);
           return "";
-        });
-      const markdown = purchaseSection
-        ? `${baseMarkdown}\n\n${purchaseSection}`
-        : baseMarkdown;
+        })
+        : "";
       const reportPath = path.join(outputDir, `monthly-report-${dateText}${suffix}.md`);
-      fs.writeFileSync(reportPath, markdown);
+      fs.writeFileSync(
+        reportPath,
+        purchaseSection ? `${markdown}\n\n${purchaseSection}` : markdown,
+      );
       archiveMonthlyReport({
         outputDir,
         dateText,
@@ -765,8 +768,14 @@ async function runReportOnce(outputDir) {
       await runGuardedAction(
         guardReportDate,
         "正式发送前",
-        () => sendDingTalk(markdown),
+        () => sendDingTalk(markdown, { alert: isScheduledRun }),
       );
+      // 进货明细单独发一条，跟月报分开。这条发失败不能回头影响已经发出去的月报。
+      if (purchaseSection) {
+        await sendDingTalk(purchaseSection).catch((error) => {
+          console.warn(`门店进货明细推送失败：${error.message || error}`);
+        });
+      }
     } finally {
       await context.close();
     }
