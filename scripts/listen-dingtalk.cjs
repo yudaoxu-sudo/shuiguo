@@ -40,6 +40,10 @@ const {
   readLemengLoginStatus,
   startLemengLogin,
 } = require("./lemeng-sms-bridge.cjs");
+const {
+  chunkText,
+  isPurchaseDetailCommand,
+} = require("./zhimadi-purchase-detail.cjs");
 
 const heartbeatPath = path.resolve("output/listener-heartbeat.json");
 const commandStatePath = path.resolve("output/listener-command-state.json");
@@ -1867,6 +1871,27 @@ async function main() {
 
     // 乐檬是唯一没有自助登录入口的来源，验证码只会发到店主手机上。
     // 单聊里回一句“乐檬码123456”就能完成登录，不必进群、也不必开终端。
+    if (isPurchaseDetailCommand(text)) {
+      console.log(`[${new Date().toISOString()}] purchase detail command accepted`);
+      await sendBestEffort("进货明细回执", () => sendSessionText(
+        client, message.sessionWebhook, message.senderStaffId,
+        "收到，正在读芝麻地销售明细，约半分钟。",
+      ));
+      try {
+        const { buildPurchaseDetail } = require("./purchase-detail-job.cjs");
+        const report = await buildPurchaseDetail({ plain: true });
+        for (const piece of chunkText(report)) {
+          await sendSessionText(client, message.sessionWebhook, message.senderStaffId, piece);
+        }
+      } catch (error) {
+        await sendBestEffort("进货明细失败", () => sendSessionText(
+          client, message.sessionWebhook, message.senderStaffId,
+          `进货明细生成失败：${String(error.message || error).slice(0, 160)}`,
+        ));
+      }
+      return;
+    }
+
     if (isLemengLoginCommand(text)) {
       lemengPendingSince = Date.now();
       console.log(`[${new Date().toISOString()}] lemeng login command accepted`);

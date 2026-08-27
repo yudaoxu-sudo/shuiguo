@@ -24,6 +24,7 @@
     "douyin:aggregate-api": "node scripts/read-current-douyin-aggregate-api.cjs",
     "douyin:dual-report": "node scripts/send-dual-douyin-report.cjs",
     "zhimadi:current": "node scripts/read-current-zhimadi.cjs",
+    "zhimadi:purchase": "node scripts/purchase-detail-job.cjs",
     "lemeng:current": "node scripts/read-current-lemeng.cjs"
   },
   "dependencies": {
