@@ -7,7 +7,8 @@ const defaultLogPath = path.resolve("output/lemeng-login.log");
 
 // 群里“666”是月报口令，纯数字容易撞车，所以乐檬验证码必须带前缀。
 const codePattern = /(?:乐檬码|乐檬验证码|乐檬短信码)[:：]?\s*(\d{4,8})(?!\d)/;
-const commandPattern = /乐檬(?:重新)?登录/;
+const commandPattern = /乐檬(?:重新)?(?:登录)?$|乐檬(?:重新)?登录/;
+const pendingTtlMs = 10 * 60 * 1000;
 
 function extractLemengSmsCode(text) {
   const match = String(text || "").replace(/\s+/g, " ").match(codePattern);
@@ -15,9 +16,22 @@ function extractLemengSmsCode(text) {
 }
 
 function isLemengLoginCommand(text) {
-  const value = String(text || "");
+  const value = String(text || "").replace(/@\S+/g, "").trim();
+  if (!value) return false;
   if (extractLemengSmsCode(value)) return false;
+  if (/\d/.test(value)) return false;
   return commandPattern.test(value);
+}
+
+// 触发登录之后的十分钟内，店主直接发一串数字就当验证码，不用再打前缀。
+// “666” 永远是月报口令，不会被当成验证码。
+function extractPendingSmsCode(text, pendingSince, { now = Date.now(), ttlMs = pendingTtlMs } = {}) {
+  if (!pendingSince || now - pendingSince > ttlMs) return null;
+  const value = String(text || "").replace(/@\S+/g, "");
+  const runs = value.match(/\d{4,8}/g) || [];
+  if (runs.length !== 1) return null;
+  if (/^6+$/.test(runs[0])) return null;
+  return runs[0];
 }
 
 function deliverLemengSmsCode(code, { codePath = defaultCodePath } = {}) {
@@ -66,6 +80,8 @@ function startLemengLogin({
 }
 
 module.exports = {
+  extractPendingSmsCode,
+  pendingTtlMs,
   defaultCodePath,
   defaultLogPath,
   deliverLemengSmsCode,

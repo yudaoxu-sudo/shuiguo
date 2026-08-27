@@ -8,6 +8,7 @@ const {
   deliverLemengSmsCode,
   extractLemengSmsCode,
   isLemengLoginCommand,
+  extractPendingSmsCode,
   readLemengLoginStatus,
 } = require("../scripts/lemeng-sms-bridge.cjs");
 
@@ -62,4 +63,28 @@ test("reads the login outcome back out of the log", () => {
   assert.match(failed.message, /仍停留在登录页/);
 
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("accepts a bare code right after the owner asks to sign in", () => {
+  const now = Date.now();
+  assert.equal(extractPendingSmsCode("123456", now, { now }), "123456");
+  assert.equal(extractPendingSmsCode("@水果店月报 8842", now, { now }), "8842");
+});
+
+test("never swallows the 666 report command as a verification code", () => {
+  const now = Date.now();
+  assert.equal(extractPendingSmsCode("666", now, { now }), null);
+  assert.equal(extractPendingSmsCode("666666", now, { now }), null);
+  assert.equal(extractPendingSmsCode("@水果店月报 666", now, { now }), null);
+});
+
+test("stops accepting bare digits once the sign-in window closes", () => {
+  const now = Date.now();
+  assert.equal(extractPendingSmsCode("123456", now - 11 * 60 * 1000, { now }), null);
+  assert.equal(extractPendingSmsCode("123456", null, { now }), null);
+});
+
+test("ignores an ambiguous message carrying several numbers", () => {
+  const now = Date.now();
+  assert.equal(extractPendingSmsCode("报表 2026 1234", now, { now }), null);
 });

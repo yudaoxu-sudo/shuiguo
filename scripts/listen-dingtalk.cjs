@@ -35,6 +35,7 @@ const {
 const {
   deliverLemengSmsCode,
   extractLemengSmsCode,
+  extractPendingSmsCode,
   isLemengLoginCommand,
   readLemengLoginStatus,
   startLemengLogin,
@@ -1325,6 +1326,7 @@ async function main() {
   }
 
   let running = false;
+  let lemengPendingSince = null;
   let loginSession = null;
   let shuttingDown = false;
 
@@ -1852,18 +1854,21 @@ async function main() {
     // 乐檬是唯一没有自助登录入口的来源，验证码只会发到店主手机上。
     // 单聊里回一句“乐檬码123456”就能完成登录，不必进群、也不必开终端。
     if (isLemengLoginCommand(text)) {
+      lemengPendingSince = Date.now();
       startLemengLogin({ cwd: process.cwd() });
       await sendBestEffort("乐檬登录回复", () => sendSessionText(
         client,
         message.sessionWebhook,
         message.senderStaffId,
-        "已让乐檬发送短信验证码，收到后回复：乐檬码123456",
+        "已让乐檬发送短信验证码，收到后直接把数字发过来就行。",
       ));
       return;
     }
 
-    const lemengSmsCode = extractLemengSmsCode(text);
+    const lemengSmsCode = extractLemengSmsCode(text)
+      || extractPendingSmsCode(text, lemengPendingSince);
     if (lemengSmsCode) {
+      lemengPendingSince = null;
       try {
         deliverLemengSmsCode(lemengSmsCode);
       } catch (error) {
