@@ -23,6 +23,10 @@ const { loadEnv } = require("./send-dingtalk.cjs");
 const { withLock } = require("./runtime-lock.cjs");
 const { gotoZhimadi, isZhimadiAuthenticated } = require("./zhimadi-navigation.cjs");
 const {
+  isLemengLoginUrl,
+  isLemengSessionExpiredText,
+} = require("./lemeng-login.cjs");
+const {
   markObservedZhimadiRecovery,
 } = require("./zhimadi-repair-coordinator.cjs");
 const {
@@ -68,7 +72,12 @@ async function lemengOk(page) {
     timeout: 60000,
   });
   await page.waitForTimeout(3000);
-  return (await page.locator("input[type='password']").count()) === 0;
+  if ((await page.locator("input[type='password']").count()) > 0) return false;
+
+  // 会话过期时乐檬返回 500 错误页，上面同样没有密码框。只看密码框会把它当成已登录。
+  if (isLemengLoginUrl(page.url())) return false;
+  const text = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
+  return !isLemengSessionExpiredText(text);
 }
 
 async function inspectLogins(timeoutMs) {

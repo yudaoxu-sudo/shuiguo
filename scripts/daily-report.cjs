@@ -9,6 +9,10 @@ const { archiveMonthlyReport } = require("./report-history.cjs");
 const { withLock } = require("./runtime-lock.cjs");
 const { gotoZhimadi } = require("./zhimadi-navigation.cjs");
 const { writeHealthFailure } = require("./healthcheck-error.cjs");
+const {
+  isLemengLoginUrl,
+  isLemengSessionExpiredText,
+} = require("./lemeng-login.cjs");
 const { pruneDebugArtifactsQuietly } = require("./debug-artifacts.cjs");
 const { requestTimeoutSignal } = require("./send-dingtalk.cjs");
 const {
@@ -475,7 +479,16 @@ async function readLemeng(page) {
   );
 
   if (await isLoginPage(page)) {
-    throw new Error("乐檬登录态失效，需要先运行 setup-login 并手动完成验证码登录");
+    throw new Error("乐檬登录态失效，需要运行 pnpm lemeng:login 重新登录");
+  }
+
+  // 会话过期时乐檬返回 500 错误页，日期控件永远不会出现。及早识别，
+  // 避免白等 60 秒再重试三轮。
+  const lemengBodyText = await page.locator("body")
+    .innerText({ timeout: 5000 })
+    .catch(() => "");
+  if (isLemengLoginUrl(page.url()) || isLemengSessionExpiredText(lemengBodyText)) {
+    throw new Error("乐檬登录态失效，需要运行 pnpm lemeng:login 重新登录");
   }
 
   await page.waitForSelector('input[placeholder="开始日期"]:visible', {

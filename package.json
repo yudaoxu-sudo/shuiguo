@@ -8,6 +8,7 @@
     "zhimadi:login": "node scripts/zhimadi-login.cjs",
     "douyin:login": "node scripts/douyin-login.cjs",
     "douyin:login:repair": "node scripts/douyin-login.cjs --listener-sms",
+    "lemeng:login": "node scripts/lemeng-login.cjs",
     "listen": "node scripts/listen-dingtalk.cjs",
     "healthcheck": "node scripts/check-listener-health.cjs",
     "login-healthcheck": "node scripts/check-login-health.cjs",
