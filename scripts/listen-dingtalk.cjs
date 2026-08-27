@@ -1872,27 +1872,39 @@ async function main() {
     // 乐檬是唯一没有自助登录入口的来源，验证码只会发到店主手机上。
     // 单聊里回一句“乐檬码123456”就能完成登录，不必进群、也不必开终端。
     if (isPurchaseDetailCommand(text)) {
+      if (!rememberCommand(commandKey(message, text))) {
+        console.log(`[${new Date().toISOString()}] duplicate purchase command ignored`);
+        return;
+      }
       console.log(`[${new Date().toISOString()}] purchase detail command accepted`);
       await sendBestEffort("进货明细回执", () => sendSessionText(
         client, message.sessionWebhook, message.senderStaffId,
         "收到，正在读芝麻地销售明细，约半分钟。",
       ));
-      try {
-        const { buildPurchaseDetail } = require("./purchase-detail-job.cjs");
-        const report = await buildPurchaseDetail({ plain: true });
-        for (const piece of chunkText(report)) {
-          await sendSessionText(client, message.sessionWebhook, message.senderStaffId, piece);
+      // 报表要跑一分多钟。钉钉 60 秒收不到 ack 就重投同一条消息，
+      // 所以这里先返回，让生成在后台跑完再回结果。
+      void (async () => {
+        try {
+          const { buildPurchaseDetail } = require("./purchase-detail-job.cjs");
+          const report = await buildPurchaseDetail({ plain: true });
+          for (const piece of chunkText(report)) {
+            await sendSessionText(client, message.sessionWebhook, message.senderStaffId, piece);
+          }
+        } catch (error) {
+          await sendBestEffort("进货明细失败", () => sendSessionText(
+            client, message.sessionWebhook, message.senderStaffId,
+            `进货明细生成失败：${String(error.message || error).slice(0, 160)}`,
+          ));
         }
-      } catch (error) {
-        await sendBestEffort("进货明细失败", () => sendSessionText(
-          client, message.sessionWebhook, message.senderStaffId,
-          `进货明细生成失败：${String(error.message || error).slice(0, 160)}`,
-        ));
-      }
+      })();
       return;
     }
 
     if (isLemengLoginCommand(text)) {
+      if (!rememberCommand(commandKey(message, text))) {
+        console.log(`[${new Date().toISOString()}] duplicate lemeng command ignored`);
+        return;
+      }
       lemengPendingSince = Date.now();
       console.log(`[${new Date().toISOString()}] lemeng login command accepted`);
       // 先回执再干活：店主要先确认机器人听见了。
@@ -1948,6 +1960,10 @@ async function main() {
     const lemengSmsCode = extractLemengSmsCode(text)
       || extractPendingSmsCode(text, lemengPendingSince);
     if (lemengSmsCode) {
+      if (!rememberCommand(commandKey(message, text))) {
+        console.log(`[${new Date().toISOString()}] duplicate lemeng code ignored`);
+        return;
+      }
       lemengPendingSince = null;
       console.log(`[${new Date().toISOString()}] lemeng sms code accepted`);
       try {
