@@ -82,8 +82,8 @@ function aggregatePurchaseRows(rows, today) {
 // 钉钉单聊只能发纯文本，markdown 记号会原样显示出来，所以要能关掉。
 function renderPurchaseDetail(summary, dateText, {
   plain = false,
-  storeTop = 5,
-  warehouseTop = 10,
+  storeTop = Infinity,
+  warehouseTop = Infinity,
 } = {}) {
   const short = String(dateText || "").slice(5);
   const h = (text) => (plain ? text : `#### ${text}`);
@@ -111,7 +111,7 @@ function renderPurchaseDetail(summary, dateText, {
     );
   }
 
-  lines.push(h(`仓库出货汇总 ${short}`), `今日出货前 ${warehouseTop} 名`, "");
+  lines.push(h(`仓库出货汇总 ${short}`), "按今日出货量排名，今日｜本月（件）", "");
   const top = summary.warehouse.slice(0, warehouseTop);
   top.forEach((item, index) => {
     lines.push(`${index + 1}. ${item.product} ${formatQty(item.day)}｜${formatQty(item.month)}`);

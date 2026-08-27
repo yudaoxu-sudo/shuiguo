@@ -84,7 +84,21 @@ test("splits a long report between stores, never mid-line", () => {
   chunks.forEach((c) => assert.equal(c.startsWith("\n"), false));
 });
 
-test("keeps the phone view short by folding the tail into one line", () => {
+test("lists every product by default and never silently drops one", () => {
+  const many = [];
+  for (let i = 0; i < 9; i += 1) {
+    many.push({
+      day: "2026-08-27", store: "水木花都店", product: `商品${i}`,
+      unit: "件", qty: String(10 - i), amount: "100",
+    });
+  }
+  const s = aggregatePurchaseRows(many, "2026-08-27");
+  const text = renderPurchaseDetail(s, "2026-08-27", { plain: true });
+  for (let i = 0; i < 9; i += 1) assert.match(text, new RegExp(`商品${i} `));
+  assert.equal(text.includes("其余"), false, "默认不折叠，一项都不能省");
+});
+
+test("can still fold the tail when a caller asks for it", () => {
   const many = [];
   for (let i = 0; i < 9; i += 1) {
     many.push({
