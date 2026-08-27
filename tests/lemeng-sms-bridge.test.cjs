@@ -101,3 +101,15 @@ test("still finds a bare code when the mention is glued to the digits", () => {
   assert.equal(extractPendingSmsCode("@水果店月报123456", now, { now }), "123456");
   assert.equal(extractLemengSmsCode("@水果店月报乐檬码123456"), "123456");
 });
+
+const { isGroupConversation } = require("../scripts/listen-dingtalk.cjs");
+
+// 单聊不能覆盖群上下文，否则芝麻地验证码图会从群里跑到私聊，
+// 那等于改了群里原有的行为。
+test("keeps a one-to-one chat from taking over the group context", () => {
+  assert.equal(isGroupConversation({ conversationType: "2" }), true);
+  assert.equal(isGroupConversation({ conversationType: "1" }), false);
+  assert.equal(isGroupConversation({ conversationType: 1 }), false);
+  // 缺字段时按群聊处理，保持原有行为不变。
+  assert.equal(isGroupConversation({}), true);
+});

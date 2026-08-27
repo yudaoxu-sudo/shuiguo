@@ -208,8 +208,16 @@ function writeJson(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
 }
 
+// 钉钉 conversationType："1" 是单聊，"2" 是群聊。
+// 单聊不能覆盖群上下文，否则芝麻地验证码图会跑到私聊里去，
+// 那就等于改了群里原有的行为。
+function isGroupConversation(message) {
+  return String(message?.conversationType ?? "2") === "2";
+}
+
 function saveGroupContext(message) {
   if (!message?.conversationId || !message?.robotCode) return;
+  if (!isGroupConversation(message)) return;
   writeJson(groupContextPath, {
     conversationId: message.conversationId,
     robotCode: message.robotCode,
@@ -1682,6 +1690,12 @@ async function main() {
     const message = JSON.parse(res.data);
     saveGroupContext(message);
     const text = messageText(message);
+    // 数字一律打码，验证码不进日志。
+    console.log(
+      `[${new Date().toISOString()}] inbound `
+      + `type=${message?.conversationType ?? "?"} `
+      + `text=${text.replace(/\d/g, "#").slice(0, 30)}`,
+    );
 
     if (loginSession && Date.now() > loginSession.expiresAt) {
       await closeLoginSession(loginSession);
@@ -2014,6 +2028,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  isGroupConversation,
   canonicalReportDate,
   createReportResumeFlow,
   createDouyinSmsFlow,
