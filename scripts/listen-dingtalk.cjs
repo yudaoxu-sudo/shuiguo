@@ -1864,7 +1864,8 @@ async function main() {
 
     // 乐檬是唯一没有自助登录入口的来源，验证码只会发到店主手机上。
     // 单聊里回一句“乐檬码123456”就能完成登录，不必进群、也不必开终端。
-    if (isReportPreviewCommand(text)) {
+    // 预览只在单聊生效：群里保持原样，只有 @机器人 666 出正式月报。
+    if (!isGroupConversation(message) && isReportPreviewCommand(text)) {
       if (!rememberCommand(commandKey(message, text))) {
         console.log(`[${new Date().toISOString()}] duplicate preview command ignored`);
         return;

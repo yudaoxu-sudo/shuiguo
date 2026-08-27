@@ -66,3 +66,16 @@ test("keeps a one-to-one chat from taking over the group context", () => {
   assert.equal(isGroupConversation({ conversationType: "1" }), false);
   assert.equal(isGroupConversation({}), true);
 });
+
+// 预览指令只在单聊生效，群里必须维持原样：只有 @机器人 666 出正式月报。
+test("keeps the preview out of the group", () => {
+  const { isReportPreviewCommand } = require("../scripts/zhimadi-purchase-detail.cjs");
+  const groupMessage = { conversationType: "2" };
+  const privateMessage = { conversationType: "1" };
+
+  const wouldPreview = (message, text) => !isGroupConversation(message) && isReportPreviewCommand(text);
+
+  assert.equal(wouldPreview(privateMessage, "月报"), true);
+  assert.equal(wouldPreview(groupMessage, "@水果店月报月报"), false, "群里不能触发预览");
+  assert.equal(wouldPreview(groupMessage, "@水果店月报666"), false);
+});
