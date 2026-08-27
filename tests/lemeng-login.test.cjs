@@ -1,10 +1,17 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+
 const {
   isLemengLoginUrl,
   isLemengSessionExpiredText,
+  isLemengSmsStepText,
   lemengCredentials,
+  parseSmsCode,
+  waitForSmsCode,
 } = require("../scripts/lemeng-login.cjs");
 
 // 2026-08-27 生产实际抓到的过期页面正文。
@@ -64,4 +71,46 @@ test("refuses to run without credentials instead of prompting for them", () => {
     }),
     { username: "13800000000", password: "secret" },
   );
+});
+
+// 2026-08-27 生产实测：密码正确后乐檬进入短信验证步骤。
+const realSmsStepPage = "请验证手机号187****2906 验证码 发送验证码 登 录 5天内自动登录 联系客服";
+
+test("recognises the SMS step that follows a correct password", () => {
+  assert.equal(isLemengSmsStepText(realSmsStepPage), true);
+  assert.equal(isLemengSmsStepText("营业收款报表 开始日期 门店汇总"), false);
+  assert.equal(isLemengSmsStepText(""), false);
+});
+
+test("pulls a verification code out of whatever the shop owner types", () => {
+  assert.equal(parseSmsCode(" 123456 \n"), "123456");
+  assert.equal(parseSmsCode("验证码是 8842"), "8842");
+  assert.equal(parseSmsCode("没有数字"), null);
+  assert.equal(parseSmsCode(""), null);
+});
+
+test("takes the code from a dropped file and removes it after one use", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lemeng-sms-"));
+  const codePath = path.join(dir, "code.txt");
+  fs.writeFileSync(codePath, "654321\n");
+
+  const code = await waitForSmsCode({ codePath, env: {}, timeoutMs: 5000, log: () => {} });
+  assert.equal(code, "654321");
+  assert.equal(fs.existsSync(codePath), false, "用过的验证码文件必须删掉");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("gives up instead of hanging when no code ever arrives", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lemeng-sms-"));
+  await assert.rejects(
+    () => waitForSmsCode({
+      codePath: path.join(dir, "missing.txt"),
+      env: {},
+      timeoutMs: 100,
+      log: () => {},
+    }),
+    /超时/,
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
 });
