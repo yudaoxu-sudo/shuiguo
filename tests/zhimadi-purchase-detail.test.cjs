@@ -170,3 +170,18 @@ test("leaves 666 and 进货 to their own handlers", () => {
   assert.equal(isPurchaseDetailCommand("@水果店月报进货"), true);
   assert.equal(isPurchaseDetailCommand("月报"), false);
 });
+
+// 进货单据一般下午才录进芝麻地，白天问会是空的。
+test("says the books are still empty instead of reporting zero", () => {
+  const empty = aggregatePurchaseRows(
+    [{ day: "2026-08-27", store: "水木花都店", product: "西梅", unit: "件", qty: "5", amount: "100" }],
+    "2026-08-28",
+  );
+  assert.equal(empty.stores.length, 0);
+
+  const text = renderPurchaseDetail(empty, "2026-08-28", { plain: true });
+  assert.match(text, /今天还没有进货记录/);
+  assert.match(text, /下午才录入/);
+  assert.equal(text.includes("合计 当日"), false, "空的时候不该甩一个 0 元合计");
+  assert.equal(text.includes("仓库出货汇总"), false);
+});

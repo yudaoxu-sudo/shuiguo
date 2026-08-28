@@ -90,11 +90,19 @@ function renderPurchaseDetail(summary, dateText, {
   const h = (text) => (plain ? text : `#### ${text}`);
   const b = (text) => (plain ? text : `**${text}**`);
   const br = (text) => (plain ? text : `${text}  `);
-  const lines = [
-    h(`门店进货明细 ${short}`),
-    br("今日｜本月（件）"),
-    "",
-  ];
+  const lines = [h(`门店进货明细 ${short}`)];
+
+  // 进货单据一般下午才录进芝麻地，白天问会是空的。说清楚，
+  // 别甩一句“合计 0 元”让人以为今天没进货。
+  if (!summary.stores.length) {
+    lines.push(
+      br("今天还没有进货记录入账。"),
+      br("芝麻地里的单据通常下午才录入，晚上的月报会带上完整数据。"),
+    );
+    return lines.join("\n");
+  }
+
+  lines.push(br("今日｜本月（件）"), "");
 
   for (const store of summary.stores) {
     lines.push(br(b(store.store)));
