@@ -1,4 +1,3 @@
-const DETAIL_IFRAME = "iframe#sellSummary_sellSummary";
 const DETAIL_PATH = "/index.php?s=/sellSummary/getSellSummaryData.html";
 
 function toNumber(value) {
@@ -132,20 +131,13 @@ function renderPurchaseDetail(summary, dateText, {
   return lines.join("\n");
 }
 
+// 不点菜单、不开标签。芝麻地是标签式应用，留下的「销售明细表」标签会让
+// 下一次读销售汇总表时数据网格渲染不出来（2026-08-27 夜里就是这么failed的）。
+// 数据本来就是同源接口，在主界面直接取即可。
 async function fetchPurchaseRows(page, { monthStart, today, gotoZhimadi }) {
   await gotoZhimadi(page, { readiness: "report" });
-  const sale = page.getByText("销售", { exact: true }).first();
-  if (await sale.isVisible().catch(() => false)) {
-    await sale.click();
-    await page.waitForTimeout(1200);
-  }
-  await page.getByText("销售明细表", { exact: true }).first().click();
-  const handle = await page.waitForSelector(DETAIL_IFRAME, { timeout: 20000 });
-  const frame = await handle.contentFrame();
-  if (!frame) throw new Error("芝麻地销售明细表 iframe 没有加载");
-  await page.waitForTimeout(7000);
 
-  const rows = await frame.evaluate(async ({ path, start, end }) => {
+  const rows = await page.evaluate(async ({ path, start, end }) => {
     const url = `${path}&page=1&limit=8000&start_date=${start}&end_date=${end}`
       + "&date_type=1&examine_status=+&order_by=tdate&order_type=desc";
     // 少了这个头，后台会返回整页 HTML 而不是 JSON。
