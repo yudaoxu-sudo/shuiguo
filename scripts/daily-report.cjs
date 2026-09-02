@@ -477,25 +477,31 @@ async function waitForZhimadiSummary(frame) {
 }
 
 
-// 乐檬会不定期弹公告框（版本更新、系统维护），它的遮罩 z-index 1000 覆盖整页，
-// 会把后面所有点击都吃掉，报表因此读不出来。进页面先把它关掉。
-async function dismissLemengNotice(page) {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const mask = page.locator(".earth-modal-mask, .lemon-modal").first();
-    if (!(await mask.isVisible().catch(() => false))) return;
-
+// 乐檬会不定期弹公告框（版本更新、系统维护），遮罩 z-index 1000 盖住整页，
+// 后面所有点击都会被它吃掉。两个坑：页面上有个 display:none 的同类节点，
+// 只能用遮罩判断有没有弹窗；确认按钮带倒计时（「确认(2s)」），不能全等匹配。
+async function dismissLemengNotice(page, { timeoutMs = 20000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let closed = false;
+  while (Date.now() < deadline) {
+    const mask = page.locator(".earth-modal-mask").first();
+    if (!(await mask.isVisible().catch(() => false))) {
+      if (closed) console.log("乐檬公告框已关闭");
+      return;
+    }
     const confirm = page
-      .locator(".earth-modal-wrap button, .lemon-modal button")
-      .filter({ hasText: /^(确\s*认|确\s*定|知道了|我知道了|关\s*闭)$/ })
+      .locator(".earth-modal-wrap:visible button, .earth-modal-wrap:visible .earth-btn")
+      .filter({ hasText: /确\s*认|确\s*定|知道了|关\s*闭/ })
       .first();
     if (await confirm.isVisible().catch(() => false)) {
-      console.log("乐檬弹出公告框，已关闭");
-      await confirm.click({ timeout: 10000 }).catch(() => {});
+      await confirm.click({ timeout: 8000 }).catch(() => {});
+      closed = true;
     } else {
-      await page.locator(".earth-modal-close").first().click({ timeout: 10000 }).catch(() => {});
+      await page.locator(".earth-modal-close").first().click({ timeout: 5000 }).catch(() => {});
     }
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(1000);
   }
+  console.warn("乐檬公告框没能关掉，后续点击可能被遮罩拦截");
 }
 
 async function readLemeng(page) {
@@ -504,8 +510,6 @@ async function readLemeng(page) {
     "https://sharec.lemengcloud.com/report/business/business-collection-report",
     { waitUntil: "domcontentloaded", timeout: 60000 },
   );
-
-  await dismissLemengNotice(page);
 
   if (await isLoginPage(page)) {
     throw new Error("乐檬登录态失效，需要运行 pnpm lemeng:login 重新登录");
@@ -523,6 +527,7 @@ async function readLemeng(page) {
   await page.waitForSelector('input[placeholder="开始日期"]:visible', {
     timeout: 60000,
   });
+  await dismissLemengNotice(page);
 
   const periodSelector = page.locator(
     ".earth-select-selection-item:visible",
