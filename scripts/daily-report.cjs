@@ -778,8 +778,13 @@ async function runReportOnce(outputDir) {
       const markdown = buildMarkdown(dateText, zhimadi, lemeng, douyin);
       // 只有夜间自动任务带进货明细：@666 是人工临时要月报，不该多这一大段。
       // 私聊预览要看完整的一晚长什么样，所以留一个显式开关。
+      // 夜间这一段可以在 .env 里用 REPORT_PURCHASE_SECTION=off 临时停掉，
+      // 停掉只影响自动推送，私聊「进货」和「月报」预览照常出。
       const isScheduledRun = process.env.REPORT_MANAGED_BY_SCHEDULED === "1";
-      const includePurchase = isScheduledRun
+      const nightlyPurchaseEnabled = String(
+        process.env.REPORT_PURCHASE_SECTION || "",
+      ).trim().toLowerCase() !== "off";
+      const includePurchase = (isScheduledRun && nightlyPurchaseEnabled)
         || process.env.REPORT_INCLUDE_PURCHASE === "1";
       const purchaseSection = includePurchase
         ? await buildPurchaseSection(context, dateText).catch((error) => {
