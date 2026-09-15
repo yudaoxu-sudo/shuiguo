@@ -1250,13 +1250,45 @@ async function startZhimadiLoginSession() {
   }
 }
 
+// 芝麻地提交登录后弹出的提示（验证码错误、密码错误、账号锁定……）常常几秒就消失，
+// 所以在等待期间持续收集，而不是等超时后才看页面。
+const ZHIMADI_NOTICE_PATTERN = /[^\n]{0,24}(错误|失败|锁定|频繁|不正确|不存在|过期|冻结|异常|上限)[^\n]{0,24}/g;
+
 async function waitForZhimadiAuthenticated(page, timeoutMs = 60000) {
   const deadline = Date.now() + timeoutMs;
+  const notices = new Set();
   while (Date.now() < deadline) {
     if (await isZhimadiAuthenticated(page)) return true;
+    const text = await page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
+    for (const match of text.matchAll(ZHIMADI_NOTICE_PATTERN)) notices.add(match[0].trim());
     await page.waitForTimeout(1000);
   }
+  await recordZhimadiSubmitFailure(page, notices);
   return false;
+}
+
+// “提交后未确认登录”分不清是验证码错、密码错还是账号被锁。失败时留下现场：
+// 提示文字进日志，页面文字和截图存到 output/login-repair，下一次失败就有凭据。
+async function recordZhimadiSubmitFailure(page, notices = new Set()) {
+  try {
+    const dir = path.resolve("output/login-repair");
+    fs.mkdirSync(dir, { recursive: true });
+    const stamp = Date.now();
+    const text = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
+    const seen = [...notices];
+    fs.writeFileSync(
+      path.join(dir, `zhimadi-after-submit-${stamp}.txt`),
+      [`url=${page.url()}`, `notices=${seen.join(" | ") || "(none)"}`, "", text].join("\n"),
+    );
+    console.warn(
+      `芝麻地提交后仍未登录：提示 [${seen.join(" | ") || "无"}] ｜ 页面 ${text.replace(/\s+/g, " ").trim().slice(0, 160)}`,
+    );
+    await page
+      .screenshot({ path: path.join(dir, `zhimadi-after-submit-${stamp}.png`), timeout: 10000 })
+      .catch(() => {});
+  } catch (error) {
+    console.warn(`芝麻地提交失败现场保存失败：${error.message || error}`);
+  }
 }
 
 async function clickZhimadiLogin(session, code) {
@@ -1706,6 +1738,12 @@ async function main() {
       && manualCaptchaCode
       && isLoginSessionReply(loginSession, message)
     ) {
+      // 提交后要等最多 60 秒确认登录，超过钉钉的 ack 窗口，同一条回复会被重投。
+      // 不去重的话，重投会在第一次还在等待时再填一遍码，失败分支随后把浏览器关掉。
+      if (!rememberCommand(commandKey(message, text))) {
+        console.log(`[${new Date().toISOString()}] duplicate captcha reply ignored`);
+        return;
+      }
       const code = manualCaptchaCode;
       const repairIncidentId = loginSession.repairIncidentId;
       const afterLoginReport = loginSession.afterLoginReport;
