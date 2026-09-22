@@ -159,7 +159,9 @@ async function waitForLogin(page) {
       || (await terminal.question("抖音来客手机号：")).trim();
     if (!/^\d{11}$/.test(phone)) throw new Error("抖音来客手机号格式不正确");
 
-    if (configuredPassword) {
+    // 走钉钉短信修复时不能先试密码：抖音会静默拦住密码登录，页面原地不动，
+    // 白等 60 秒超时后整个进程退出，短信那一步永远走不到。
+    if (configuredPassword && !listenerSmsRepairRequested()) {
       const passwordLogin = await firstVisible(
         page.getByText("密码登录", { exact: true }),
       );
