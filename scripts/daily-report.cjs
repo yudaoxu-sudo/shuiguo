@@ -515,18 +515,31 @@ async function readLemeng(page) {
     throw new Error("乐檬登录态失效，需要运行 pnpm lemeng:login 重新登录");
   }
 
-  // 会话过期时乐檬返回 500 错误页，日期控件永远不会出现。及早识别，
-  // 避免白等 60 秒再重试三轮。
-  const lemengBodyText = await page.locator("body")
-    .innerText({ timeout: 5000 })
-    .catch(() => "");
-  if (isLemengLoginUrl(page.url()) || isLemengSessionExpiredText(lemengBodyText)) {
-    throw new Error("乐檬登录态失效，需要运行 pnpm lemeng:login 重新登录");
+  // 会话过期时乐檬返回 500「用户信息已过期」，日期控件永远不会出现。
+  // 那张错误页是 SPA 渲染的，domcontentloaded 时 body 还是空的，只查一次必然扑空，
+  // 于是白等 60 秒 ×3 轮才失败，还被归成读取失败而不是登录失效。
+  // 改成让日期控件和过期提示赛跑，谁先出现算谁。
+  const lemengDateInput = page
+    .locator('input[placeholder="开始日期"]:visible')
+    .first();
+  const lemengDeadline = Date.now() + 60000;
+  let lemengReady = false;
+  while (Date.now() < lemengDeadline) {
+    if (await lemengDateInput.isVisible().catch(() => false)) {
+      lemengReady = true;
+      break;
+    }
+    const text = await page.locator("body")
+      .innerText({ timeout: 3000 })
+      .catch(() => "");
+    if (isLemengLoginUrl(page.url()) || isLemengSessionExpiredText(text)) {
+      throw new Error("乐檬登录态失效，需要运行 pnpm lemeng:login 重新登录");
+    }
+    await page.waitForTimeout(1000);
   }
-
-  await page.waitForSelector('input[placeholder="开始日期"]:visible', {
-    timeout: 60000,
-  });
+  if (!lemengReady) {
+    throw new Error("乐檬营业收款报表日期控件 60 秒未加载");
+  }
   await dismissLemengNotice(page);
 
   const periodSelector = page.locator(
