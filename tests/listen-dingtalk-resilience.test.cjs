@@ -7,6 +7,7 @@ const test = require("node:test");
 const {
   deliverBoundCaptchaImage,
   deliverLemengQrImage,
+  deliverZhimadiCaptchaImage,
   hasBoundLoginContext,
   notifyLockStalled,
   promptDeliveryDefinitelyNotSent,
@@ -167,6 +168,77 @@ test("builds the DingTalk session Markdown image from the uploaded media id", ()
       markdown: {
         title: "乐檬登录二维码",
         text: "![乐檬登录二维码](media-1)",
+      },
+      at: {
+        atUserIds: ["user-1"],
+        isAtAll: false,
+      },
+    },
+  );
+});
+
+test("routes a Zhimadi captcha to the exact one-to-one session", async () => {
+  const calls = [];
+  await deliverZhimadiCaptchaImage({
+    message: {
+      conversationType: "1",
+      conversationId: "private-conversation-1",
+      robotCode: "robot-1",
+      sessionWebhook: "https://example.invalid/session",
+      senderStaffId: "user-1",
+    },
+    upload: async () => {
+      calls.push("upload");
+      return "media-1";
+    },
+    sessionSend: async (mediaId) => calls.push(`session:${mediaId}`),
+    groupSend: async (mediaId) => calls.push(`group:${mediaId}`),
+  });
+
+  assert.deepEqual(calls, ["upload", "session:media-1"]);
+});
+
+test("keeps a Zhimadi captcha in the originating group", async () => {
+  const calls = [];
+  await deliverZhimadiCaptchaImage({
+    message: {
+      conversationType: "2",
+      conversationId: "conversation-1",
+      robotCode: "robot-1",
+    },
+    upload: async () => "media-1",
+    sessionSend: async (mediaId) => calls.push(`session:${mediaId}`),
+    groupSend: async (mediaId) => calls.push(`group:${mediaId}`),
+  });
+
+  assert.deepEqual(calls, ["group:media-1"]);
+});
+
+test("does not upload a Zhimadi captcha without a safe reply route", async () => {
+  let uploads = 0;
+  await assert.rejects(
+    deliverZhimadiCaptchaImage({
+      message: {},
+      upload: async () => {
+        uploads += 1;
+        return "media-1";
+      },
+      sessionSend: async () => {},
+      groupSend: async () => {},
+    }),
+    (error) => error?.promptDefinitelyNotSent === true,
+  );
+  assert.equal(uploads, 0);
+});
+
+test("labels a Zhimadi session image without changing the media id", () => {
+  assert.deepEqual(
+    sessionImagePayload("user-1", "media-1", "芝麻地登录验证码"),
+    {
+      msgtype: "markdown",
+      markdown: {
+        title: "芝麻地登录验证码",
+        text: "![芝麻地登录验证码](media-1)",
       },
       at: {
         atUserIds: ["user-1"],

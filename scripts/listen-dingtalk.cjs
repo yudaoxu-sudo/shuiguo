@@ -15,7 +15,6 @@ const {
 const {
   requestTimeoutMs,
   requestTimeoutSignal,
-  sendDingTalkImage,
   sendDingTalkMarkdown,
   withPromiseTimeout,
 } = require("./send-dingtalk.cjs");
@@ -217,6 +216,7 @@ function saveGroupContext(message) {
   if (!message?.conversationId || !message?.robotCode) return;
   if (!isGroupConversation(message)) return;
   writeJson(groupContextPath, {
+    conversationType: "2",
     conversationId: message.conversationId,
     robotCode: message.robotCode,
     sessionWebhook: message.sessionWebhook || "",
@@ -228,7 +228,7 @@ function saveGroupContext(message) {
 function loadGroupContext() {
   const context = readJson(groupContextPath);
   if (!context?.conversationId || !context?.robotCode) return null;
-  return context;
+  return { ...context, conversationType: "2" };
 }
 
 function saveDouyinSmsTarget(
@@ -483,12 +483,12 @@ async function sendSessionText(client, sessionWebhook, senderStaffId, content) {
   });
 }
 
-function sessionImagePayload(senderStaffId, mediaId) {
+function sessionImagePayload(senderStaffId, mediaId, title = "乐檬登录二维码") {
   return {
     msgtype: "markdown",
     markdown: {
-      title: "乐檬登录二维码",
-      text: `![乐檬登录二维码](${mediaId})`,
+      title,
+      text: `![${title}](${mediaId})`,
     },
     at: {
       atUserIds: [senderStaffId],
@@ -497,11 +497,11 @@ function sessionImagePayload(senderStaffId, mediaId) {
   };
 }
 
-async function sendSessionImage(client, message, mediaId) {
+async function sendSessionImage(client, message, mediaId, title) {
   return sendSessionPayload(
     client,
     message.sessionWebhook,
-    sessionImagePayload(message.senderStaffId, mediaId),
+    sessionImagePayload(message.senderStaffId, mediaId, title),
   );
 }
 
@@ -1028,35 +1028,51 @@ function definitelyUnsentError(message) {
   return error;
 }
 
-async function deliverLemengQrImage({ message, upload, sessionSend, groupSend }) {
+async function deliverConversationImage({
+  message,
+  upload,
+  sessionSend,
+  groupSend,
+  imageLabel,
+}) {
   const conversationType = String(message?.conversationType || "");
   if (conversationType === "1") {
     if (!message?.sessionWebhook || !message?.senderStaffId) {
-      throw definitelyUnsentError("乐檬单聊缺少可验证的回复路由");
+      throw definitelyUnsentError(`${imageLabel}单聊缺少可验证的回复路由`);
     }
     return deliverBoundCaptchaImage({ upload, send: sessionSend });
   }
 
   if (conversationType === "2") {
     if (!message?.conversationId || !message?.robotCode) {
-      throw definitelyUnsentError("乐檬群聊缺少可验证的回复路由");
+      throw definitelyUnsentError(`${imageLabel}群聊缺少可验证的回复路由`);
     }
     return deliverBoundCaptchaImage({ upload, send: groupSend });
   }
 
-  throw definitelyUnsentError("乐檬二维码的会话类型不受支持");
+  throw definitelyUnsentError(`${imageLabel}的会话类型不受支持`);
+}
+
+async function deliverLemengQrImage(options) {
+  return deliverConversationImage({ ...options, imageLabel: "乐檬二维码" });
+}
+
+async function deliverZhimadiCaptchaImage(options) {
+  return deliverConversationImage({ ...options, imageLabel: "芝麻地验证码" });
 }
 
 async function sendCaptchaImage(client, message, filePath) {
-  if (message?.conversationId && message?.robotCode) {
-    await deliverBoundCaptchaImage({
-      upload: () => uploadDingTalkImage(client, filePath),
-      send: (mediaId) => sendGroupImage(client, message, mediaId),
-    });
-    return;
-  }
-
-  await sendDingTalkImage(filePath);
+  return deliverZhimadiCaptchaImage({
+    message,
+    upload: () => uploadDingTalkImage(client, filePath),
+    sessionSend: (mediaId) => sendSessionImage(
+      client,
+      message,
+      mediaId,
+      "芝麻地登录验证码",
+    ),
+    groupSend: (mediaId) => sendGroupImage(client, message, mediaId),
+  });
 }
 
 async function captureZhimadiCaptcha(session) {
@@ -2133,6 +2149,7 @@ module.exports = {
   createDouyinSmsFlow,
   deliverBoundCaptchaImage,
   deliverLemengQrImage,
+  deliverZhimadiCaptchaImage,
   extractManualCaptchaCode,
   hasBoundLoginContext,
   isDeferredMonthlyReportError,
