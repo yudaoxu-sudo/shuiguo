@@ -35,6 +35,13 @@ function listenerSmsRepairRequested({
     || env.DOUYIN_SMS_REPAIR_MODE === "listener";
 }
 
+function shouldUseConfiguredPassword({
+  configuredPassword,
+  listenerSmsRequested,
+}) {
+  return Boolean(configuredPassword) && !listenerSmsRequested;
+}
+
 function loadFreshSmsRepairTarget({
   filePath = path.resolve(smsTargetPath),
   now = Date.now(),
@@ -158,10 +165,14 @@ async function waitForLogin(page) {
     const phone = process.env.DOUYIN_PHONE
       || (await terminal.question("抖音来客手机号：")).trim();
     if (!/^\d{11}$/.test(phone)) throw new Error("抖音来客手机号格式不正确");
+    const useListenerSms = listenerSmsRepairRequested();
 
     // 走钉钉短信修复时不能先试密码：抖音会静默拦住密码登录，页面原地不动，
     // 白等 60 秒超时后整个进程退出，短信那一步永远走不到。
-    if (configuredPassword && !listenerSmsRepairRequested()) {
+    if (shouldUseConfiguredPassword({
+      configuredPassword,
+      listenerSmsRequested: useListenerSms,
+    })) {
       const passwordLogin = await firstVisible(
         page.getByText("密码登录", { exact: true }),
       );
@@ -197,7 +208,6 @@ async function waitForLogin(page) {
     await phoneInput.fill(phone);
     await acceptAgreement(page);
 
-    const useListenerSms = listenerSmsRepairRequested();
     const listenerTarget = useListenerSms ? loadFreshSmsRepairTarget() : null;
     if (useListenerSms && !listenerTarget) {
       throw new Error(
@@ -357,4 +367,5 @@ if (require.main === module) {
 module.exports = {
   listenerSmsRepairRequested,
   loadFreshSmsRepairTarget,
+  shouldUseConfiguredPassword,
 };

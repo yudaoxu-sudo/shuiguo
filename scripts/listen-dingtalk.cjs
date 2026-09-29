@@ -440,9 +440,7 @@ function rememberCommand(key) {
   return true;
 }
 
-async function sendSessionText(client, sessionWebhook, senderStaffId, content) {
-  if (!sessionWebhook) return;
-
+async function sendSessionPayload(client, sessionWebhook, payload) {
   const accessToken = await withPromiseTimeout(
     () => client.getAccessToken(),
     { label: "钉钉访问令牌" },
@@ -453,14 +451,7 @@ async function sendSessionText(client, sessionWebhook, senderStaffId, content) {
       "content-type": "application/json",
       "x-acs-dingtalk-access-token": accessToken,
     },
-    body: JSON.stringify({
-      msgtype: "text",
-      text: { content },
-      at: {
-        atUserIds: senderStaffId ? [senderStaffId] : [],
-        isAtAll: false,
-      },
-    }),
+    body: JSON.stringify(payload),
     signal: requestTimeoutSignal(),
   });
   const result = await response.text();
@@ -477,6 +468,41 @@ async function sendSessionText(client, sessionWebhook, senderStaffId, content) {
       if (error.message.startsWith("钉钉会话回复失败:")) throw error;
     }
   }
+}
+
+async function sendSessionText(client, sessionWebhook, senderStaffId, content) {
+  if (!sessionWebhook) return;
+
+  return sendSessionPayload(client, sessionWebhook, {
+    msgtype: "text",
+    text: { content },
+    at: {
+      atUserIds: senderStaffId ? [senderStaffId] : [],
+      isAtAll: false,
+    },
+  });
+}
+
+function sessionImagePayload(senderStaffId, mediaId) {
+  return {
+    msgtype: "markdown",
+    markdown: {
+      title: "乐檬登录二维码",
+      text: `![乐檬登录二维码](${mediaId})`,
+    },
+    at: {
+      atUserIds: [senderStaffId],
+      isAtAll: false,
+    },
+  };
+}
+
+async function sendSessionImage(client, message, mediaId) {
+  return sendSessionPayload(
+    client,
+    message.sessionWebhook,
+    sessionImagePayload(message.senderStaffId, mediaId),
+  );
 }
 
 function stopChildProcessGroup(child, signal) {
@@ -994,6 +1020,31 @@ async function deliverBoundCaptchaImage({ upload, send }) {
     throw error;
   }
   return send(mediaId);
+}
+
+function definitelyUnsentError(message) {
+  const error = new Error(message);
+  error.promptDefinitelyNotSent = true;
+  return error;
+}
+
+async function deliverLemengQrImage({ message, upload, sessionSend, groupSend }) {
+  const conversationType = String(message?.conversationType || "");
+  if (conversationType === "1") {
+    if (!message?.sessionWebhook || !message?.senderStaffId) {
+      throw definitelyUnsentError("乐檬单聊缺少可验证的回复路由");
+    }
+    return deliverBoundCaptchaImage({ upload, send: sessionSend });
+  }
+
+  if (conversationType === "2") {
+    if (!message?.conversationId || !message?.robotCode) {
+      throw definitelyUnsentError("乐檬群聊缺少可验证的回复路由");
+    }
+    return deliverBoundCaptchaImage({ upload, send: groupSend });
+  }
+
+  throw definitelyUnsentError("乐檬二维码的会话类型不受支持");
 }
 
 async function sendCaptchaImage(client, message, filePath) {
@@ -1986,11 +2037,15 @@ async function main() {
         try {
           const status = await loginLemeng({
             onQr: async (qrPath) => {
-              const mediaId = await uploadDingTalkImage(client, qrPath);
-              await sendGroupImage(client, message, mediaId);
+              await deliverLemengQrImage({
+                message,
+                upload: () => uploadDingTalkImage(client, qrPath),
+                sessionSend: (mediaId) => sendSessionImage(client, message, mediaId),
+                groupSend: (mediaId) => sendGroupImage(client, message, mediaId),
+              });
               await sendSessionText(
                 client, message.sessionWebhook, message.senderStaffId,
-                "用乐檬零售APP扫这个码，三分钟内有效。",
+                "请马上用乐檬零售APP扫码；未成功时重新发送“乐檬”获取新码。",
               );
             },
           });
@@ -2077,6 +2132,7 @@ module.exports = {
   createReportResumeFlow,
   createDouyinSmsFlow,
   deliverBoundCaptchaImage,
+  deliverLemengQrImage,
   extractManualCaptchaCode,
   hasBoundLoginContext,
   isDeferredMonthlyReportError,
@@ -2094,6 +2150,7 @@ module.exports = {
   scheduledResumeTimeoutMs,
   sendBestEffort,
   sendGroupImage,
+  sessionImagePayload,
   sendSessionText,
   selectReportRunner,
   uploadDingTalkImage,

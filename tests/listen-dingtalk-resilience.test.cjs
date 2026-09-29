@@ -6,6 +6,7 @@ const test = require("node:test");
 
 const {
   deliverBoundCaptchaImage,
+  deliverLemengQrImage,
   hasBoundLoginContext,
   notifyLockStalled,
   promptDeliveryDefinitelyNotSent,
@@ -13,6 +14,7 @@ const {
   runWithTaskWatchdog,
   sendBestEffort,
   sendGroupImage,
+  sessionImagePayload,
   sendSessionText,
   scheduledResumeTimeoutMs,
   uploadDingTalkImage,
@@ -95,6 +97,82 @@ test("an upload failure is definitely unsent while a group-send timeout is uncer
       send: async () => { throw groupTimeout; },
     }),
     (error) => error === groupTimeout && error.promptDefinitelyNotSent !== true,
+  );
+});
+
+test("routes a Lemeng QR to the exact one-to-one session", async () => {
+  const calls = [];
+  await deliverLemengQrImage({
+    message: {
+      conversationType: "1",
+      sessionWebhook: "https://example.invalid/session",
+      senderStaffId: "user-1",
+    },
+    upload: async () => {
+      calls.push("upload");
+      return "media-1";
+    },
+    sessionSend: async (mediaId) => calls.push(`session:${mediaId}`),
+    groupSend: async (mediaId) => calls.push(`group:${mediaId}`),
+  });
+
+  assert.deepEqual(calls, ["upload", "session:media-1"]);
+});
+
+test("keeps Lemeng QR delivery in the originating group", async () => {
+  const calls = [];
+  await deliverLemengQrImage({
+    message: {
+      conversationType: "2",
+      conversationId: "conversation-1",
+      robotCode: "robot-1",
+    },
+    upload: async () => "media-1",
+    sessionSend: async (mediaId) => calls.push(`session:${mediaId}`),
+    groupSend: async (mediaId) => calls.push(`group:${mediaId}`),
+  });
+
+  assert.deepEqual(calls, ["group:media-1"]);
+});
+
+test("fails closed before upload when a Lemeng QR has no safe reply route", async () => {
+  for (const message of [
+    { conversationType: "1", senderStaffId: "user-1" },
+    { conversationType: "2", conversationId: "conversation-1" },
+    { conversationType: "3" },
+    {},
+  ]) {
+    let uploads = 0;
+    await assert.rejects(
+      deliverLemengQrImage({
+        message,
+        upload: async () => {
+          uploads += 1;
+          return "media-1";
+        },
+        sessionSend: async () => {},
+        groupSend: async () => {},
+      }),
+      (error) => error?.promptDefinitelyNotSent === true,
+    );
+    assert.equal(uploads, 0);
+  }
+});
+
+test("builds the DingTalk session Markdown image from the uploaded media id", () => {
+  assert.deepEqual(
+    sessionImagePayload("user-1", "media-1"),
+    {
+      msgtype: "markdown",
+      markdown: {
+        title: "乐檬登录二维码",
+        text: "![乐檬登录二维码](media-1)",
+      },
+      at: {
+        atUserIds: ["user-1"],
+        isAtAll: false,
+      },
+    },
   );
 });
 

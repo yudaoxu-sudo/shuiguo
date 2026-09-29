@@ -170,6 +170,10 @@ function isDouyinLoginError(error) {
   return String(error?.message || error).includes("抖音来客登录态失效");
 }
 
+function isLemengLoginError(error) {
+  return String(error?.message || error).includes("乐檬登录态失效");
+}
+
 function isZhimadiPageLoadError(error) {
   const message = String(error?.message || error);
   return message.includes("芝麻地主界面加载超时")
@@ -367,7 +371,11 @@ async function retryStep(name, action, attempts = 3, {
     } catch (error) {
       lastError = error;
       console.warn(`${name}第 ${attempt} 次失败：${error.message}`);
-      if (isZhimadiLoginError(error) || isDouyinLoginError(error)) throw error;
+      if (
+        isZhimadiLoginError(error)
+        || isDouyinLoginError(error)
+        || isLemengLoginError(error)
+      ) throw error;
       if (attempt >= attempts) break;
 
       // 退避重试，但绝不睡过本次报表的总预算，避免被父进程 watchdog 直接杀掉。

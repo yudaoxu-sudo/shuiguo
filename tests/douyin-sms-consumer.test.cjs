@@ -12,6 +12,7 @@ const {
 const {
   loadFreshSmsRepairTarget,
   listenerSmsRepairRequested,
+  shouldUseConfiguredPassword,
 } = require("../scripts/douyin-login.cjs");
 
 const baseNow = Date.parse("2026-07-26T12:00:00.000Z");
@@ -330,4 +331,19 @@ test("requires an explicit listener SMS mode for the production repair entry", (
     packageJson.scripts["douyin:login:repair"],
     "node scripts/douyin-login.cjs --listener-sms",
   );
+});
+
+test("listener SMS repair skips a configured password and ordinary login keeps it", () => {
+  assert.equal(shouldUseConfiguredPassword({
+    configuredPassword: "configured-secret",
+    listenerSmsRequested: false,
+  }), true);
+  assert.equal(shouldUseConfiguredPassword({
+    configuredPassword: "configured-secret",
+    listenerSmsRequested: true,
+  }), false);
+  assert.equal(shouldUseConfiguredPassword({
+    configuredPassword: "",
+    listenerSmsRequested: false,
+  }), false);
 });

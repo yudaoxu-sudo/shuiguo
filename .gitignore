@@ -1,4 +1,5 @@
 .env
+.env.bak.*
 .claude/
 node_modules/
 output/

@@ -88,6 +88,25 @@ test("a login failure still skips the remaining retries", async () => {
   assert.deepEqual(slept, []);
 });
 
+test("a Lemeng login failure skips the remaining retries", async () => {
+  const slept = [];
+  let calls = 0;
+
+  await assert.rejects(
+    () => retryStep("乐檬报表", () => {
+      calls += 1;
+      throw new Error("乐檬登录态失效，需要运行 pnpm lemeng:login 重新登录");
+    }, 3, {
+      ...unlimited,
+      sleep: async (ms) => { slept.push(ms); },
+    }),
+    /乐檬登录态失效/,
+  );
+
+  assert.equal(calls, 1);
+  assert.deepEqual(slept, []);
+});
+
 test("reads the retry backoff and total budget from the environment", () => {
   assert.deepEqual(retryBackoffsMs({}), [5000, 30000, 120000]);
   assert.deepEqual(
