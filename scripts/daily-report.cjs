@@ -89,6 +89,14 @@ async function launchContext() {
   });
 }
 
+async function closeContextQuietly(context) {
+  try {
+    await context.close();
+  } catch {
+    // The browser may already be closed after a page or transport failure.
+  }
+}
+
 async function clickByText(frameOrPage, text) {
   const locator = frameOrPage.getByText(text, { exact: true });
   const count = await locator.count();
@@ -835,7 +843,7 @@ async function runReportOnce(outputDir) {
         });
       }
     } finally {
-      await context.close();
+      await closeContextQuietly(context);
     }
   });
 }
@@ -883,6 +891,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  closeContextQuietly,
   isZhimadiRepairAlertOwnedError,
   isZhimadiRepairDeferredError,
   persistRequesterReportResumeOutcome,

@@ -7,7 +7,10 @@ const {
   isLemengSessionExpiredText,
   lemengCredentials,
 } = require("../scripts/lemeng-login.cjs");
-const { isGroupConversation } = require("../scripts/listen-dingtalk.cjs");
+const {
+  classifyLoginCommand,
+  isGroupConversation,
+} = require("../scripts/listen-dingtalk.cjs");
 
 // 2026-08-27 生产实际抓到的过期页面正文：没有密码框，只有一个重新登录按钮。
 const realExpiredPage = [
@@ -50,6 +53,14 @@ test("never answers the report command or a stray number", () => {
   assert.equal(isLemengLoginCommand("@水果店月报666"), false);
   assert.equal(isLemengLoginCommand("乐檬123456"), false);
   assert.equal(isLemengLoginCommand(""), false);
+});
+
+test("dispatches overlapping login commands to the intended source", () => {
+  assert.equal(classifyLoginCommand("登录"), "zhimadi");
+  assert.equal(classifyLoginCommand("乐檬登录"), "lemeng");
+  assert.equal(classifyLoginCommand("@水果店月报乐檬登录"), "lemeng");
+  assert.equal(classifyLoginCommand("验证码Ab12"), null);
+  assert.equal(classifyLoginCommand("报表2026-09"), null);
 });
 
 test("still refuses to guess credentials it was not given", () => {

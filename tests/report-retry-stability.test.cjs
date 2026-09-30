@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const {
+  closeContextQuietly,
   reportBudgetMs,
   retryBackoffFor,
   retryBackoffsMs,
@@ -27,6 +28,28 @@ const unlimited = {
   deadlineAt: Number.MAX_SAFE_INTEGER,
   now: () => 0,
 };
+
+test("a context cleanup failure cannot replace the report outcome", async () => {
+  let closeCalls = 0;
+  const context = {
+    async close() {
+      closeCalls += 1;
+      throw new Error("Target page, context or browser has been closed");
+    },
+  };
+  const primaryError = new Error("report read failed");
+
+  await assert.rejects(async () => {
+    try {
+      throw primaryError;
+    } finally {
+      await closeContextQuietly(context);
+    }
+  }, (error) => error === primaryError);
+  await assert.doesNotReject(() => closeContextQuietly(context));
+
+  assert.equal(closeCalls, 2);
+});
 
 test("spaces retries with a widening backoff instead of a flat five seconds", async () => {
   const slept = [];

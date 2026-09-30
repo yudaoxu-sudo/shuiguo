@@ -9,6 +9,7 @@ const {
   buildMarkdown,
   calculateOperatingTotals,
   buildStoreFinancialRows,
+  parseZhimadiText,
   storeKey,
 } = require("../scripts/read-current-zhimadi.cjs");
 const {
@@ -30,6 +31,95 @@ const {
   comparisonText,
   recordDualReportArtifactState,
 } = require("../scripts/send-dual-douyin-report.cjs");
+
+function zhimadiReportText(rowSales, totalSales = rowSales) {
+  return [
+    "销售汇总表(按客户)",
+    "客户分类",
+    "客户编号",
+    "客户名称",
+    "数量",
+    "重量(斤)",
+    "笔数",
+    "抹零金额",
+    "销售金额",
+    "销售成本",
+    "销售利润",
+    "毛利率",
+    "直营店",
+    "001",
+    "有花头古城街店",
+    "10",
+    "20.5",
+    "3",
+    "0.00",
+    rowSales,
+    "1,000.00",
+    "234.56",
+    "19.00%",
+    "合计：",
+    "10",
+    "20.5",
+    "3",
+    "0.00",
+    totalSales,
+    "1,000.00",
+    "234.56",
+    "19.00%",
+  ].join("\n");
+}
+
+test("parses Zhimadi thousands separators and rejects invalid purchase amounts", () => {
+  const report = parseZhimadiText(zhimadiReportText("1,234.56"));
+  assert.equal(report.rows[0].sales, 1234.56);
+  assert.equal(report.totals.sales, 1234.56);
+
+  assert.throws(
+    () => parseZhimadiText(zhimadiReportText("金额异常")),
+    /销售金额.*有效数字/,
+  );
+  assert.throws(
+    () => calculateOperatingTotals(10000, 1500, 500, Number.NaN),
+    /进货.*有效数字/,
+  );
+});
+
+test("rejects a Zhimadi detail row with a missing column", () => {
+  const malformed = zhimadiReportText("0", "0").split("\n");
+  malformed.splice(malformed.indexOf("20.5"), 1);
+
+  assert.throws(
+    () => parseZhimadiText(malformed.join("\n")),
+    /芝麻地明细列数不完整/,
+  );
+});
+
+test("rejects a Zhimadi total row with a missing column", () => {
+  const malformed = zhimadiReportText("0", "0").split("\n");
+  malformed.pop();
+
+  assert.throws(
+    () => parseZhimadiText(malformed.join("\n")),
+    /芝麻地合计列数不完整/,
+  );
+});
+
+test("accepts a complete zero-total Zhimadi report before the month's first purchase", () => {
+  const parts = zhimadiReportText("0", "0").split("\n");
+  const text = [
+    ...parts.slice(0, 12),
+    "合计：", "0", "0", "0", "0", "0", "0", "0", "0.00%",
+  ].join("\n");
+  const report = parseZhimadiText(text);
+
+  assert.deepEqual(report.rows, []);
+  assert.equal(report.totals.sales, 0);
+  assert.match(buildMarkdown("2026-10-01", report), /芝麻地进货额：0\.00/);
+  assert.throws(
+    () => buildMarkdown("2026-10-01", { ...report, totals: { ...report.totals, sales: 1 } }),
+    /芝麻地进货汇总不一致/,
+  );
+});
 
 test("uses Douyin received amounts directly and charges only Lemeng 0.3%", () => {
   const result = calculateOperatingTotals(10000, 1500, 500, 7000, {

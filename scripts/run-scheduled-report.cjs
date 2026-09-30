@@ -36,6 +36,30 @@ function appendTail(current, chunk, limit = 4000) {
   return `${current}${chunk}`.slice(-limit);
 }
 
+function dingTalkDeliveryDisabled(env = process.env) {
+  return ["1", "true"].includes(
+    String(env.NO_DINGTALK || "").trim().toLowerCase(),
+  );
+}
+
+function assertScheduledReportConfiguration(env = process.env) {
+  if (env.DOUYIN_ENABLED !== "true") {
+    throw new Error("正式定时报表要求 DOUYIN_ENABLED=true");
+  }
+  if (dingTalkDeliveryDisabled(env)) {
+    throw new Error("正式定时报表禁止设置 NO_DINGTALK");
+  }
+  if (!String(env.DINGTALK_WEBHOOK || "").trim()) {
+    throw new Error("正式定时报表缺少 DINGTALK_WEBHOOK");
+  }
+}
+
+function shouldSendFinalFailureAlert(env = process.env, loginDeferral = false) {
+  return env.SCHEDULED_REPORT_FINAL_ATTEMPT === "1"
+    && !loginDeferral
+    && !dingTalkDeliveryDisabled(env);
+}
+
 function stopChildProcessGroup(child, signal) {
   if (!child?.pid) return;
   try {
@@ -163,7 +187,16 @@ async function main() {
     const scriptPath = dualReportDate === date
       ? "scripts/send-dual-douyin-report.cjs"
       : "scripts/daily-report.cjs";
-    const result = await runGuardedAction(
+    let configurationFailure;
+    try {
+      assertScheduledReportConfiguration();
+    } catch (error) {
+      configurationFailure = {
+        code: 1,
+        outputTail: String(error?.message || error),
+      };
+    }
+    const result = configurationFailure || await runGuardedAction(
       guardReportDate,
       "抓取前",
       () => runReport(scriptPath, date),
@@ -196,10 +229,7 @@ async function main() {
       message,
     });
 
-    if (
-      process.env.SCHEDULED_REPORT_FINAL_ATTEMPT === "1"
-      && !loginDeferral
-    ) {
+    if (shouldSendFinalFailureAlert(process.env, Boolean(loginDeferral))) {
       await sendDingTalkMarkdown(
         "水果店月度报表最终失败",
         `### 水果店月度报表最终失败\n\n今晚已自动补跑 ${attempts} 次，仍未成功。\n\n${message}`,
@@ -216,7 +246,7 @@ async function main() {
 if (require.main === module) {
   main().catch(async (error) => {
     loadEnv();
-    if (process.env.SCHEDULED_REPORT_FINAL_ATTEMPT === "1") {
+    if (shouldSendFinalFailureAlert()) {
       await sendDingTalkMarkdown(
         "水果店月度报表最终失败",
         `### 水果店月度报表最终失败\n\n${error.message || error}`,
@@ -229,9 +259,11 @@ if (require.main === module) {
 }
 
 module.exports = {
+  assertScheduledReportConfiguration,
   assertCurrentReportTargetDate,
   resolveReportTargetDate,
   runReport,
+  shouldSendFinalFailureAlert,
   scheduledLoginDeferral,
   scheduledZhimadiDeferral,
 };

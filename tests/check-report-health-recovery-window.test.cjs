@@ -1,5 +1,7 @@
 const assert = require("node:assert/strict");
+const { spawn, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
+const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
@@ -12,15 +14,126 @@ const {
   runNodePreview,
 } = require("../scripts/check-report-health.cjs");
 const {
+  assertScheduledReportConfiguration,
   assertCurrentReportTargetDate,
   resolveReportTargetDate,
   runReport,
+  shouldSendFinalFailureAlert,
   scheduledLoginDeferral,
   scheduledZhimadiDeferral,
 } = require("../scripts/run-scheduled-report.cjs");
 
 const baseNow = Date.parse("2026-07-30T04:00:00.000Z");
 const silent = () => {};
+
+test("scheduled reports fail closed when a required production setting is unsafe", () => {
+  const valid = {
+    DOUYIN_ENABLED: "true",
+    DINGTALK_WEBHOOK: "https://oapi.dingtalk.com/robot/send?access_token=test",
+  };
+
+  assert.doesNotThrow(() => assertScheduledReportConfiguration(valid));
+  assert.throws(
+    () => assertScheduledReportConfiguration({ ...valid, DOUYIN_ENABLED: "false" }),
+    /DOUYIN_ENABLED=true/,
+  );
+  assert.throws(
+    () => assertScheduledReportConfiguration({ ...valid, DINGTALK_WEBHOOK: "" }),
+    /DINGTALK_WEBHOOK/,
+  );
+  assert.throws(
+    () => assertScheduledReportConfiguration({ ...valid, NO_DINGTALK: "1" }),
+    /NO_DINGTALK/,
+  );
+});
+
+test("NO_DINGTALK also suppresses the scheduled final-failure alert", () => {
+  assert.equal(shouldSendFinalFailureAlert({
+    SCHEDULED_REPORT_FINAL_ATTEMPT: "1",
+    NO_DINGTALK: "1",
+  }), false);
+  assert.equal(shouldSendFinalFailureAlert({
+    SCHEDULED_REPORT_FINAL_ATTEMPT: "1",
+    NO_DINGTALK: "true",
+  }), false);
+  assert.equal(shouldSendFinalFailureAlert({
+    SCHEDULED_REPORT_FINAL_ATTEMPT: "1",
+    NO_DINGTALK: "0",
+  }), true);
+});
+
+test("an unsafe scheduled run records failure without starting the report", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "scheduled-config-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const today = new Date();
+  const targetDate = [
+    today.getFullYear(),
+    String(today.getMonth() + 1).padStart(2, "0"),
+    String(today.getDate()).padStart(2, "0"),
+  ].join("-");
+  const result = spawnSync(
+    process.execPath,
+    [path.resolve(__dirname, "../scripts/run-scheduled-report.cjs")],
+    {
+      cwd: directory,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        REPORT_TARGET_DATE: targetDate,
+        DOUYIN_ENABLED: "true",
+        DINGTALK_WEBHOOK: "https://oapi.dingtalk.com/robot/send?access_token=test",
+        NO_DINGTALK: "1",
+        SCHEDULED_REPORT_FINAL_ATTEMPT: "",
+      },
+    },
+  );
+  const state = JSON.parse(fs.readFileSync(
+    path.join(directory, "output/scheduled-report-state.json"),
+    "utf8",
+  ));
+
+  assert.equal(result.status, 1);
+  assert.equal(state.status, "failed");
+  assert.equal(state.sentAt, undefined);
+  assert.match(state.message, /NO_DINGTALK/);
+});
+
+test("a disabled final scheduled attempt makes no webhook request on either error path", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "scheduled-no-send-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  let requests = 0;
+  const server = http.createServer((request, response) => {
+    requests += 1;
+    request.resume();
+    response.end('{"errcode":0}');
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  for (const targetDate of ["", "invalid-date"]) {
+    const code = await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [
+        path.resolve(__dirname, "../scripts/run-scheduled-report.cjs"),
+      ], {
+        cwd: directory,
+        env: {
+          PATH: process.env.PATH,
+          REPORT_TARGET_DATE: targetDate,
+          DOUYIN_ENABLED: "true",
+          DINGTALK_WEBHOOK: `http://127.0.0.1:${server.address().port}/webhook`,
+          NO_DINGTALK: "1",
+          SCHEDULED_REPORT_FINAL_ATTEMPT: "1",
+        },
+        stdio: "ignore",
+        timeout: 5000,
+      });
+      child.once("error", reject);
+      child.once("close", resolve);
+    });
+    assert.equal(code, 1);
+  }
+  assert.equal(requests, 0);
+});
 
 test("scheduled report target dates are explicit and validated", () => {
   assert.equal(resolveReportTargetDate("2026-08-10"), "2026-08-10");

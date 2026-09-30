@@ -82,6 +82,12 @@ function messageText(message) {
   return String(message?.text?.content || "").replace(/\s+/g, "").trim();
 }
 
+function classifyLoginCommand(text) {
+  if (isLemengLoginCommand(text)) return "lemeng";
+  if (String(text || "").includes("登录")) return "zhimadi";
+  return null;
+}
+
 function commandKey(message, text) {
   const messageId = message?.msgId || message?.messageId || message?.msgid;
   if (messageId) return `message:${messageId}`;
@@ -1932,7 +1938,8 @@ async function main() {
       return;
     }
 
-    if (text.includes("登录")) {
+    const loginCommand = classifyLoginCommand(text);
+    if (loginCommand === "zhimadi") {
       if (running) {
         await sendSessionText(client, message.sessionWebhook, message.senderStaffId, "当前有任务正在运行。");
         return;
@@ -2038,7 +2045,7 @@ async function main() {
       return;
     }
 
-    if (isLemengLoginCommand(text)) {
+    if (loginCommand === "lemeng") {
       if (!rememberCommand(commandKey(message, text))) {
         console.log(`[${new Date().toISOString()}] duplicate lemeng command ignored`);
         return;
@@ -2143,6 +2150,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  classifyLoginCommand,
   isGroupConversation,
   canonicalReportDate,
   createReportResumeFlow,

@@ -1,6 +1,20 @@
 const fs = require("fs");
 const path = require("path");
 
+function parseFiniteNumber(value, label) {
+  const normalized = typeof value === "string"
+    ? value.replace(/[,，]/g, "").trim()
+    : value;
+  if (normalized === "" || normalized === null || normalized === undefined) {
+    throw new Error(`${label}不是有效数字`);
+  }
+  const number = Number(normalized);
+  if (!Number.isFinite(number)) {
+    throw new Error(`${label}不是有效数字`);
+  }
+  return number;
+}
+
 function parseZhimadiText(text) {
   const parts = text.split(/\n|\t/).map((value) => value.trim()).filter(Boolean);
   const titleIndex = parts.indexOf("销售汇总表(按客户)");
@@ -11,40 +25,64 @@ function parseZhimadiText(text) {
     throw new Error("没有找到芝麻地报表标题、表头或合计行");
   }
 
-  const headers = parts.slice(headerStart, headerStart + 11);
-  const data = parts.slice(headerStart + 11, totalIndex);
+  const expectedHeaders = [
+    "客户分类",
+    "客户编号",
+    "客户名称",
+    "数量",
+    "重量(斤)",
+    "笔数",
+    "抹零金额",
+    "销售金额",
+    "销售成本",
+    "销售利润",
+    "毛利率",
+  ];
+  const headers = parts.slice(headerStart, headerStart + expectedHeaders.length);
+  if (
+    headers.length !== expectedHeaders.length
+    || headers.some((header, index) => header !== expectedHeaders[index])
+  ) {
+    throw new Error("芝麻地报表表头不完整");
+  }
+  const data = parts.slice(headerStart + headers.length, totalIndex);
+  if (data.length % headers.length !== 0) {
+    throw new Error("芝麻地明细列数不完整");
+  }
   const rows = [];
 
   for (let index = 0; index < data.length; index += headers.length) {
     const chunk = data.slice(index, index + headers.length);
-    if (chunk.length !== headers.length) break;
     const row = Object.fromEntries(headers.map((header, i) => [header, chunk[i]]));
     rows.push({
       category: row["客户分类"],
       code: row["客户编号"],
       store: row["客户名称"],
-      quantity: Number(row["数量"]),
-      weight: Number(row["重量(斤)"]),
-      orders: Number(row["笔数"]),
-      discount: Number(row["抹零金额"]),
-      sales: Number(row["销售金额"]),
-      cost: Number(row["销售成本"]),
-      profit: Number(row["销售利润"]),
+      quantity: parseFiniteNumber(row["数量"], "芝麻地数量"),
+      weight: parseFiniteNumber(row["重量(斤)"], "芝麻地重量"),
+      orders: parseFiniteNumber(row["笔数"], "芝麻地笔数"),
+      discount: parseFiniteNumber(row["抹零金额"], "芝麻地抹零金额"),
+      sales: parseFiniteNumber(row["销售金额"], "芝麻地销售金额"),
+      cost: parseFiniteNumber(row["销售成本"], "芝麻地销售成本"),
+      profit: parseFiniteNumber(row["销售利润"], "芝麻地销售利润"),
       grossMargin: row["毛利率"],
     });
   }
 
   const totalValues = parts.slice(totalIndex + 1, totalIndex + 9);
+  if (totalValues.length !== 8) {
+    throw new Error("芝麻地合计列数不完整");
+  }
   return {
     rows,
     totals: {
-      quantity: Number(totalValues[0]),
-      weight: Number(totalValues[1]),
-      orders: Number(totalValues[2]),
-      discount: Number(totalValues[3]),
-      sales: Number(totalValues[4]),
-      cost: Number(totalValues[5]),
-      profit: Number(totalValues[6]),
+      quantity: parseFiniteNumber(totalValues[0], "芝麻地合计数量"),
+      weight: parseFiniteNumber(totalValues[1], "芝麻地合计重量"),
+      orders: parseFiniteNumber(totalValues[2], "芝麻地合计笔数"),
+      discount: parseFiniteNumber(totalValues[3], "芝麻地合计抹零金额"),
+      sales: parseFiniteNumber(totalValues[4], "芝麻地合计销售金额"),
+      cost: parseFiniteNumber(totalValues[5], "芝麻地合计销售成本"),
+      profit: parseFiniteNumber(totalValues[6], "芝麻地合计销售利润"),
       grossMargin: totalValues[7],
     },
   };
@@ -70,12 +108,16 @@ function hardBreak(value) {
 }
 
 function assertMoneyTotal(label, total, rows, field) {
+  const numericTotal = parseFiniteNumber(total, `${label}总额`);
   const detailTotal = roundMoney(
-    rows.reduce((sum, row) => sum + Number(row[field] || 0), 0),
+    rows.reduce(
+      (sum, row) => sum + parseFiniteNumber(row[field], `${label}明细金额`),
+      0,
+    ),
   );
-  if (Math.abs(roundMoney(total) - detailTotal) > 0.01) {
+  if (Math.abs(roundMoney(numericTotal) - detailTotal) > 0.01) {
     throw new Error(
-      `${label}汇总不一致：总额 ${formatMoney(total)}，明细合计 ${formatMoney(detailTotal)}`,
+      `${label}汇总不一致：总额 ${formatMoney(numericTotal)}，明细合计 ${formatMoney(detailTotal)}`,
     );
   }
 }
@@ -93,7 +135,9 @@ function calculateOperatingTotals(
   const lemengSales = roundMoney(lemengSalesWithoutCoupon || 0);
   const douyinActual = roundMoney(douyinActualReceived || 0);
   const douyinExpected = roundMoney(douyinExpectedReceived || 0);
-  const purchase = roundMoney(purchaseAmount || 0);
+  const purchase = roundMoney(
+    parseFiniteNumber(purchaseAmount, "芝麻地进货金额"),
+  );
   const douyinTotal = roundMoney(douyinActual + douyinExpected);
   const businessRevenue = roundMoney(lemengSales + douyinTotal);
   const lemengFee = roundMoney(lemengSales * lemengFeeRate);
@@ -147,7 +191,9 @@ function buildStoreFinancialRows(purchaseRows, salesRows, douyinStores = []) {
       store: row.store,
       purchase: 0,
     };
-    current.purchase = roundMoney(current.purchase + Number(row.sales || 0));
+    current.purchase = roundMoney(
+      current.purchase + parseFiniteNumber(row.sales, "芝麻地门店进货金额"),
+    );
     purchaseByKey.set(key, current);
   }
 
